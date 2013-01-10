@@ -9,7 +9,7 @@
   "author": "Ben Kelly <ben@wanderview.com>",
   "license": "BSD",
   "dependencies": {
-    "netbios-name": "~0.1.0",
+    "netbios-name": "0.2.0",
     "readable-stream": "~0.1.0"
   },
   "devDependencies": {

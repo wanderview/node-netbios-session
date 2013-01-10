@@ -24,7 +24,7 @@
 'use strict';
 
 var con = require('./lib/constant');
-var unpackName = require('netbios-name/unpack');
+var NBName = require('netbios-name');
 
 var Readable = require('readable-stream');
 var Duplex = require('readable-stream/duplex');
@@ -226,46 +226,44 @@ NetbiosSession.prototype._handleRequest = function(chunk) {
   var self = this;
   var ss = self._sessionState;
 
-  unpackName(chunk, 0, function(error, calledLen, name, suffix) {
-    if (error) {
-      console.log('Got error [' + error + '] unpacking called name');
-      // TODO:  send negative response?
-      // TODO:  call callback with error?
-      // TODO:  throw error?
+  var nbname = NBName.fromBuffer(chunk, 0);
+  if (nbname.error) {
+    console.log('Got error [' + nbname.error + '] unpacking called name');
+    // TODO:  send negative response?
+    // TODO:  call callback with error?
+    // TODO:  throw error?
+    return;
+  }
+
+  var called = nbname;
+
+  nbname = NBName.fromBuffer(chunk, calledLen);
+  if (nbname.error) {
+    console.log('Got error [' + nbname.error + '] unpacking calling name');
+    // TODO:  send negative response?
+    // TODO:  call callback with error?
+    // TODO:  throw error?
+    return;
+  }
+
+  var calling = nbname;
+
+  // If called/calling names are acceptable send positive response.  If
+  // we have no way to check for approval then default to accepting the
+  // session.
+  if (typeof ss.approveFn === 'function') {
+    var errorCode = ss.approveFn(called, calling);
+
+    // This request is for a bad name, reject
+    if (errorCode) {
+      self._sendNegativeResponse(errorCode);
       return;
     }
+  }
+  ss.mode = 'established';
+  self._sendPositiveResponse();
 
-    var called = name;
-
-    unpackName(chunk, calledLen, function(error, callingLen, name, suffix) {
-      if (error) {
-        console.log('Got error [' + error + '] unpacking calling name');
-        // TODO:  send negative response?
-        // TODO:  call callback with error?
-        // TODO:  throw error?
-        return;
-      }
-
-      var calling = name;
-
-      // If called/calling names are acceptable send positive response.  If
-      // we have no way to check for approval then default to accepting the
-      // session.
-      if (typeof ss.approveFn === 'function') {
-        var errorCode = ss.approveFn(called, calling);
-
-        // This request is for a bad name, reject
-        if (errorCode) {
-          self._sendNegativeResponse(errorCode);
-          return;
-        }
-      }
-      ss.mode = 'established';
-      self._sendPositiveResponse();
-
-      // TODO: refactor send response code into one function to be more DRY
-    });
-  });
+  // TODO: refactor send response code into one function to be more DRY
 }
 
 NetbiosSession.prototype._handleMessage = function(chunk) {
