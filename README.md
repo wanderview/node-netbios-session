@@ -12,6 +12,8 @@ host and writing sends bytes to the remote host.
 Currently the code only accepts incoming NetBIOS sessions and cannot make
 calls out.  This is on the TODO list.
 
+[![Build Status](https://travis-ci.org/wanderview/node-netbios-session.png)](https://travis-ci.org/wanderview/node-netbios-session)
+
 ## Example
 
     var Session = requiest('netbios-session');
