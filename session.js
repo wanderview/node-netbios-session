@@ -80,6 +80,13 @@ function NetbiosSession(opts, approveFn) {
 
   self._sessionState = new NetbiosSessionState(self, opts, approveFn);
 
+  self.once('finish', function() {
+    var ss = self._sessionState;
+    if (ss.socket) {
+      ss.socket.end();
+    }
+  });
+
   // We were passed a socket, so assume this is a new incoming session
   if (self._sessionState.socket) {
     self._sessionState.mode = 'establishingIn';
