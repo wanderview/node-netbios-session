@@ -29,23 +29,34 @@ var NBName = require('netbios-name');
 var Readable = require('readable-stream');
 var Duplex = require('readable-stream/duplex');
 
+var net = require('net');
 var util = require('util');
 
 var VALID_TYPES = {
-  'establishing': { 'request': true },
+  'establishingIn': { 'request': true },
+  'establishingOut': { 'positive response': true },
   'established': { 'message': true,
                    'keep alive': true }
 };
 
 util.inherits(NetbiosSession, Duplex);
 
-function NetbiosSessionState(session, socket, approveFn) {
-  this.socket = socket;
+var DEFAULT_PORT = 138;
 
-  this.inputStream = new Readable();
-  this.inputStream.wrap(socket);
+function NetbiosSessionState(session, opts, approveFn) {
+  this.callTo = opts.callTo;
+  this.callFrom = opts.callFrom;
+  this.address = opts.address;
+  this.port = opts.port || DEFAULT_PORT;
 
-  this.mode = 'establishing';
+  this.socket = opts.socket;
+  if (this.socket) {
+    this.socket.on('error', session.emit.bind(session, 'error'));
+    this.inputStream = new Readable();
+    this.inputStream.wrap(this.socket);
+  }
+
+  this.mode = null;
 
   this.approveFn = approveFn;
   this.readCallback = null;
@@ -55,39 +66,112 @@ function NetbiosSessionState(session, socket, approveFn) {
   this.readFunc = session._readHeader.bind(session);
 }
 
-function NetbiosSession(socket, options, approveFn) {
+function NetbiosSession(opts, approveFn) {
   var self = this instanceof NetbiosSession
            ? this
            : Object.create(NetbiosSession.prototype);
 
-  Readable.call(self, options);
+  opts = opts || {};
 
-  options = options || {};
+  Duplex.call(self, opts);
 
   // TODO:  We should probably accept extra arguments here indicating that
   //        this session is calling out instead of receiving a call in.
 
-  self._sessionState = new NetbiosSessionState(self, socket, approveFn);
+  self._sessionState = new NetbiosSessionState(self, opts, approveFn);
+
+  // We were passed a socket, so assume this is a new incoming session
+  if (self._sessionState.socket) {
+    self._sessionState.mode = 'establishingIn';
+
+  // Otherwise we are trying to initiate an outgoing session
+  } else {
+    self._sessionState.mode = 'establishingOut';
+    self._connect();
+  }
 
   // Auto-read from the start since we need to pull in the initial NetBIOS
-  // call operation even if the client does not issue a data read() yet.
+  // call operation or call response even if the client has not issue a data
+  // read() yet.
   self._doRead();
 
   return self;
 }
 
+NetbiosSession.prototype._connect = function() {
+  var self = this;
+  var ss = self._sessionState;
+
+  ss.socket = net.createConnection(ss.port, ss.address, function() {
+    console.log('connected to address [' + ss.address + '] port [' + ss.port + ']');
+    self._sendRequest();
+  });
+
+  ss.socket.on('error', self.emit.bind(self, 'error'));
+  ss.inputStream = new Readable();
+  ss.inputStream.wrap(ss.socket);
+};
+
+NetbiosSession.prototype._sendRequest = function() {
+  var ss = this._sessionState;
+  var bytes = 0;
+
+  // Max possible buffer is 4 bytes for header and then can only represent
+  // 131071 in 17-bit length field.
+  var buf = new Buffer(4 + 131071);
+
+  // Skip the header for the moment while we write the variable length names
+  bytes += 4;
+
+  var res = ss.callTo.write(buf, bytes);
+  if (res.error) {
+    this.emit('error', res);
+    return;
+  }
+
+  bytes += res.bytesWritten;
+
+  res = ss.callFrom.write(buf, bytes);
+  if (res.error) {
+    this.emit('error', res);
+    return;
+  };
+
+  bytes += res.bytesWritten;
+
+  var trailerLen = bytes - 4;
+
+  // Now go back and write header
+  bytes = 0;
+  var len = this._packHeader(buf, bytes, 'request', trailerLen);
+  bytes += len
+  bytes += trailerLen;
+
+  console.log('sending [' + bytes + '] bytes in new request to [' + ss.callTo + ']');
+  ss.socket.write(buf.slice(0, bytes));
+};
+
 NetbiosSession.prototype._read = function(size, callback) {
   var ss = this._sessionState;
 
+  /* TODO:  Is this a valid check?
   if (ss.readCallback) {
     throw new Error('Cannot call _read() again before previous callback occurs');
   }
+  */
   ss.readCallback = callback;
 
   this._doRead();
 }
 
 NetbiosSession.prototype._write = function(chunk, callback) {
+  var ss = this._sessionState;
+
+  // TODO: This method currently only works if we send the entire chunk
+  //       in a single socket.write().  This needs to be fixed because
+  //       the chunk may be too big to represent in a single message and
+  //       also because combining buffers with the header requires copying
+  //       the buffer which is inefficient.
 
   // Each NetBIOS session message is limited to a maximum number of bytes
   // due to the size of the length field in the header.  Therefore we
@@ -98,12 +182,12 @@ NetbiosSession.prototype._write = function(chunk, callback) {
   while (offset < chunk.length) {
 
     // latch length of this message to maximum allowed by protocol header
-    var msgLength = Math.min(chunk.length, con.MAX_TRAILER_LENGTH);
+    var msgLength = Math.min(chunk.length - offset, con.MAX_TRAILER_LENGTH);
 
-    var header = new Buffer(4);
+    var buf = new Buffer(4 + msgLength);
     this._packHeader(buf, 0, 'message', msgLength);
 
-    var msg = chunk.slice(offset, offset + msgLength);
+    chunk.copy(buf, 4, offset, offset + msgLength);
 
     // Only report back completion to caller when we write out the
     // last bit of the chunk
@@ -114,15 +198,14 @@ NetbiosSession.prototype._write = function(chunk, callback) {
       };
     }
 
-    ss.socket.write(header);
-    ss.socket.write(msg, completeHook);
+    ss.socket.write(buf, completeHook);
 
     offset += msgLength;
   }
 }
 
-NetbiosSession.prototype._packHeader = function(buf, offset, type, length) {
-  var type = con.TYPE_FROM_STRING('message');
+NetbiosSession.prototype._packHeader = function(buf, offset, typeString, length) {
+  var type = con.TYPE_FROM_STRING[typeString];
   buf.writeUInt8(type, offset);
   offset += 1;
 
@@ -169,6 +252,7 @@ NetbiosSession.prototype._readHeader = function() {
     bytes += 1;
 
     var type = con.TYPE_TO_STRING[t];
+    console.log('initial type [' + type + '] from [' + t + '] with mode [' + ss.mode + ']');
     if (!VALID_TYPES[ss.mode][type]) {
       // TODO: send negative response?
       // TODO: emit error?
@@ -176,6 +260,7 @@ NetbiosSession.prototype._readHeader = function() {
 
       // Even though this was unexpected, we need to complete reading
       // the trailer to clear the message.  Simply ignore any bytes read.
+      console.log('ignoring this message');
       type = 'ignore';
     }
     ss.trailerType = type;
@@ -194,20 +279,38 @@ NetbiosSession.prototype._readHeader = function() {
       length += con.EXTENSION_LENGTH;
     }
 
+    console.log('Read header with type [' + type + '] length [' + length + ']');
+
     ss.trailerLength = length;
 
     if (ss.trailerLength > 0) {
       ss.readFunc = this._readTrailer.bind(this);
       ss.readFunc();
+      return;
     }
+
+    if (ss.trailerType === 'positive response') {
+      console.log('outgoing established');
+      ss.mode = 'established';
+      // TODO: use something other than approveFn() to signal that we are
+      //       connected
+      ss.approveFn();
+    }
+
+    ss.trailerType = null;
+    ss.trailerLength = 0;
   }
 }
 
 NetbiosSession.prototype._readTrailer = function() {
   var ss = this._sessionState;
 
+  console.log('attempting to read trailer');
+
   var chunk = ss.inputStream.read(ss.trailerLength);
   if (chunk) {
+    console.log('read trailer');
+
     // Process the trailer data based on the message type.  Ignore keep alives
     // and unexpected types.  Just consume the trailer to clear the message.
     if (ss.trailerType === 'request') {
@@ -237,7 +340,7 @@ NetbiosSession.prototype._handleRequest = function(chunk) {
 
   var called = nbname;
 
-  nbname = NBName.fromBuffer(chunk, calledLen);
+  nbname = NBName.fromBuffer(chunk, called.bytesRead);
   if (nbname.error) {
     console.log('Got error [' + nbname.error + '] unpacking calling name');
     // TODO:  send negative response?
@@ -247,6 +350,8 @@ NetbiosSession.prototype._handleRequest = function(chunk) {
   }
 
   var calling = nbname;
+
+  console.log('received [' + called + '] [' + calling + ']');
 
   // If called/calling names are acceptable send positive response.  If
   // we have no way to check for approval then default to accepting the

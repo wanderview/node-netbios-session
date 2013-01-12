@@ -25,12 +25,75 @@
 
 var Session = require('../session');
 
+var net = require('net');
+var NBName = require('netbios-name');
+
 module.exports.testSession = function(test) {
   test.expect(1);
   var mock = {
     on: function() {}
   };
-  var s = new Session(mock);
+  var s = new Session({socket: mock});
   test.ok(s);
   test.done();
+}
+
+module.exports.testSession = function(test) {
+  var bytes = 1024 * 10;
+  test.expect(bytes);
+  var server = net.createServer();
+
+  var callee = new NBName({name: 'DST', suffix: 0x20});
+  var caller = new NBName({name: 'SRC', suffix: 0x20});
+
+  var testBuf = new Buffer(bytes);
+  for (var i = 0; i < bytes; ++i) {
+    testBuf.writeUInt8((i % 256), i);
+  }
+
+  server.on('connection', function(socket) {
+    console.log('connection');
+    var recv = new Session({socket: socket}, function(called, calling) {
+      console.log('APPROVE: called [' + called + '] calling [' + calling + ']');
+      if (called.toString() === callee.toString()){
+        return null;
+      }
+      return 'Called name not present';
+    });
+
+    _testRead(recv, bytes, function(recvBuf) {
+      for (var i = 0; i < bytes && i < recvBuf.length; ++i) {
+        test.equal(recvBuf[i], testBuf[i]);
+      };
+      server.close();
+      recv.end();
+      test.done();
+    });
+  });
+
+  server.listen(0, '127.0.0.1', function() {
+    var port = server.address().port;
+    console.log('port [' + port + ']');
+
+    var send = new Session({
+      callTo: callee,
+      callFrom: caller,
+      address: '127.0.0.1',
+      port: port
+    }, function() {
+      console.log('send established');
+      send.write(testBuf, null, function() {
+        send.end();
+      });
+    });
+  });
+};
+
+function _testRead(readable, len, callback) {
+  var testBuf = readable.read(len);
+  if (!testBuf) {
+    readable.on('readable', _testRead.bind(null, readable, len, callback));
+    return;
+  }
+  callback(testBuf);
 }
