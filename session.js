@@ -23,6 +23,8 @@
 
 'use strict';
 
+module.exports = NetbiosSession;
+
 var con = require('./lib/constant');
 var NBName = require('netbios-name');
 
@@ -41,11 +43,13 @@ var VALID_TYPES = {
 
 util.inherits(NetbiosSession, Duplex);
 
+// TODO:  Implement retarget response when we have a use case
+
 var DEFAULT_PORT = 138;
 
 // TODO:  Work around bug in Net.Socket with reading large buffers. Remove
 //        when node master has been updated.
-var READABLE_OPTS = {highWaterMark: con.MAX_TRAILER_LENGTH + 4};
+var READABLE_OPTS = {highWaterMark: con.MAX_TRAILER_LENGTH + con.HEADER_LENGTH};
 
 function NetbiosSessionState(session, opts, approveFn) {
   this.callTo = opts.callTo;
@@ -123,10 +127,10 @@ NetbiosSession.prototype._sendRequest = function() {
   var ss = this._sessionState;
   var bytes = 0;
 
-  var buf = new Buffer(4 + con.MAX_TRAILER_LENGTH);
+  var buf = new Buffer(con.HEADER_LENGTH + con.MAX_TRAILER_LENGTH);
 
   // Skip the header for the moment while we wmainlinerite the variable length names
-  bytes += 4;
+  bytes += con.HEADER_LENGTH;
 
   var res = ss.callTo.write(buf, bytes);
   if (res.error) {
@@ -144,7 +148,7 @@ NetbiosSession.prototype._sendRequest = function() {
 
   bytes += res.bytesWritten;
 
-  var trailerLen = bytes - 4;
+  var trailerLen = bytes - con.HEADER_LENGTH;
 
   // Now go back and write header
   bytes = 0;
@@ -173,36 +177,40 @@ NetbiosSession.prototype._write = function(chunk, callback) {
   // may not be able to write this chunk out in one message.  To handle
   // this situation iterator over the chunk and write out a header for
   // each section equaling this maximum message size.
-  this._writeFlow(chunk, 0, callback);
+
+  this._writeChunk(chunk, 0, callback);
 };
 
-NetbiosSession.prototype._writeFlow = function(chunk, offset, callback) {
-    var ss = this._sessionState;
+NetbiosSession.prototype._writeChunk = function(chunk, offset, callback) {
+  var self = this;
+  var ss = self._sessionState;
 
-    // latch length of this message to maximum allowed by protocol header
-    var msgLength = Math.min(chunk.length - offset, con.MAX_TRAILER_LENGTH);
+  // latch length of this message to maximum allowed by protocol header
+  var msgLength = Math.min(chunk.length - offset, con.MAX_TRAILER_LENGTH);
 
-    var buf = new Buffer(4 + msgLength);
-    this._packHeader(buf, 0, 'message', msgLength);
+  // Write the header out for this bit of the chunk
+  var buf = new Buffer(con.HEADER_LENGTH);
+  self._packHeader(buf, 0, 'message', msgLength);
+  _writeFlow(ss.socket, buf, function() {
 
-    // TODO: don't require copy of message data
-    chunk.copy(buf, 4, offset, offset + msgLength);
-
-    // Only report back completion to caller when we write out the
-    // last bit of the chunk
+    // Write the trailer out.  When done, either write the next part of
+    // the chunk out or call the original _write() completion callback
+    var end = offset + msgLength;
     var completeHook = callback;
-
-    if (offset + msgLength < chunk.length) {
-      completeHook = this._writeFlow.bind(this, chunk, offset + msgLength,
-                                          callback);
+    if (end < chunk.length) {
+      completeHook = self._writeChunk.bind(self, chunk, end, callback);
     }
-
-    if(ss.socket.write(buf)) {
-      completeHook();
-    } else {
-      ss.socket.once('drain', completeHook);
-    }
+    _writeFlow(ss.socket, chunk.slice(offset, end), completeHook);
+  });
 };
+
+function _writeFlow(stream, buf, callback) {
+  if (stream.write(buf)) {
+    callback();
+    return;
+  }
+  stream.once('drain', callback);
+}
 
 NetbiosSession.prototype._packHeader = function(buf, offset, typeString, length) {
   var type = con.TYPE_FROM_STRING[typeString];
@@ -242,8 +250,7 @@ NetbiosSession.prototype._doRead = function() {
 NetbiosSession.prototype._readHeader = function() {
   var ss = this._sessionState;
 
-  // The header is a fixed 4-bytes long
-  var chunk = ss.inputStream.read(4);
+  var chunk = ss.inputStream.read(con.HEADER_LENGTH);
   if (chunk) {
     var bytes = 0;
 
@@ -383,7 +390,7 @@ NetbiosSession.prototype._handleMessage = function(chunk) {
 NetbiosSession.prototype._sendPositiveResponse = function() {
   var ss = this._sessionState;
 
-  var buf = new Buffer(4);
+  var buf = new Buffer(con.HEADER_LENGTH);
   var bytes = 0;
 
   var len = this._packHeader(buf, bytes, 'positive response', 0);
@@ -395,7 +402,7 @@ NetbiosSession.prototype._sendPositiveResponse = function() {
 NetbiosSession.prototype._sendNegativeResponse = function(errorCode) {
   var ss = this._sessionState;
 
-  var buf = new Buffer(5);
+  var buf = new Buffer(con.HEADER_LENGTH + 1);
   var bytes = 0;
 
   var len = this._packHeader(buf, bytes, 'negative response', 1);
@@ -406,7 +413,3 @@ NetbiosSession.prototype._sendNegativeResponse = function(errorCode) {
 
   ss.socket.write(buf);
 };
-
-// TODO:  Implement retarget response when we have a use case
-
-module.exports = NetbiosSession;
