@@ -29,17 +29,7 @@ var net = require('net');
 var NBName = require('netbios-name');
 
 module.exports.testSession = function(test) {
-  test.expect(1);
-  var mock = {
-    on: function() {}
-  };
-  var s = new Session({socket: mock});
-  test.ok(s);
-  test.done();
-}
-
-module.exports.testSession = function(test) {
-  var bytes = 1024 * 10;
+  var bytes = 1024 * 1024;
   test.expect(bytes);
   var server = net.createServer();
 
@@ -52,9 +42,7 @@ module.exports.testSession = function(test) {
   }
 
   server.on('connection', function(socket) {
-    console.log('connection');
     var recv = new Session({socket: socket}, function(called, calling) {
-      console.log('APPROVE: called [' + called + '] calling [' + calling + ']');
       if (called.toString() === callee.toString()){
         return null;
       }
@@ -73,7 +61,6 @@ module.exports.testSession = function(test) {
 
   server.listen(0, '127.0.0.1', function() {
     var port = server.address().port;
-    console.log('port [' + port + ']');
 
     var send = new Session({
       callTo: callee,
@@ -81,7 +68,6 @@ module.exports.testSession = function(test) {
       address: '127.0.0.1',
       port: port
     }, function() {
-      console.log('send established');
       send.write(testBuf, null, function() {
         send.end();
       });
@@ -92,7 +78,7 @@ module.exports.testSession = function(test) {
 function _testRead(readable, len, callback) {
   var testBuf = readable.read(len);
   if (!testBuf) {
-    readable.on('readable', _testRead.bind(null, readable, len, callback));
+    readable.once('readable', _testRead.bind(null, readable, len, callback));
     return;
   }
   callback(testBuf);
