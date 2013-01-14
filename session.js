@@ -45,7 +45,7 @@ util.inherits(NetbiosSession, Duplex);
 
 // TODO:  Implement retarget response when we have a use case
 
-var DEFAULT_PORT = 138;
+var DEFAULT_PORT = 139;
 
 // TODO:  Work around bug in Net.Socket with reading large buffers. Remove
 //        when node master has been updated.
