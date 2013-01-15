@@ -30,7 +30,7 @@ var NBName = require('netbios-name');
 
 module.exports.testSession = function(test) {
   var bytes = 1024 * 1024;
-  test.expect(bytes);
+  test.expect(bytes + 1);
   var server = net.createServer();
 
   var callee = new NBName({name: 'DST', suffix: 0x20});
@@ -42,7 +42,9 @@ module.exports.testSession = function(test) {
   }
 
   server.on('connection', function(socket) {
-    var recv = new Session({socket: socket}, function(called, calling) {
+    var recv = new Session();
+    recv.attach(socket, function(error, called, calling) {
+      test.equal(error, null);
       if (called.toString() === callee.toString()){
         return null;
       }
@@ -62,12 +64,8 @@ module.exports.testSession = function(test) {
   server.listen(0, '127.0.0.1', function() {
     var port = server.address().port;
 
-    var send = new Session({
-      callTo: callee,
-      callFrom: caller,
-      address: '127.0.0.1',
-      port: port
-    }, function() {
+    var send = new Session();
+    send.connect(port, '127.0.0.1', caller, callee, function(error) {
       send.write(testBuf, null, function() {
         send.end();
       });

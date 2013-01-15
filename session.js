@@ -47,26 +47,11 @@ util.inherits(NetbiosSession, Duplex);
 
 var DEFAULT_PORT = 139;
 
-// TODO:  Work around bug in Net.Socket with reading large buffers. Remove
-//        when node master has been updated.
-var READABLE_OPTS = {highWaterMark: con.MAX_TRAILER_LENGTH + con.HEADER_LENGTH};
-
-function NetbiosSessionState(session, opts, approveFn) {
-  this.callTo = opts.callTo;
-  this.callFrom = opts.callFrom;
-  this.address = opts.address;
-  this.port = opts.port || DEFAULT_PORT;
-
-  this.socket = opts.socket;
-  if (this.socket) {
-    this.socket.on('error', session.emit.bind(session, 'error'));
-    this.inputStream = new Readable(READABLE_OPTS);
-    this.inputStream.wrap(this.socket);
-  }
-
+function NetbiosSessionState(session, opts) {
   this.mode = null;
 
-  this.approveFn = approveFn;
+  this.attachCallback = null;
+  this.connectCallback = null;
   this.readCallback = null;
 
   this.trailerType = null;
@@ -74,7 +59,7 @@ function NetbiosSessionState(session, opts, approveFn) {
   this.readFunc = session._readHeader.bind(session);
 }
 
-function NetbiosSession(opts, approveFn) {
+function NetbiosSession(opts) {
   var self = this instanceof NetbiosSession
            ? this
            : Object.create(NetbiosSession.prototype);
@@ -83,47 +68,71 @@ function NetbiosSession(opts, approveFn) {
 
   Duplex.call(self, opts);
 
-  self._sessionState = new NetbiosSessionState(self, opts, approveFn);
+  self._sessionState = new NetbiosSessionState(self, opts);
 
   self.once('finish', function() {
     var ss = self._sessionState;
     if (ss.socket) {
       ss.socket.end();
+      ss.socket = null;
     }
+    ss.mode = null;
   });
-
-  // We were passed a socket, so assume this is a new incoming session
-  if (self._sessionState.socket) {
-    self._sessionState.mode = 'establishingIn';
-
-  // Otherwise we are trying to initiate an outgoing session
-  } else {
-    self._sessionState.mode = 'establishingOut';
-    self._connect();
-  }
-
-  // Auto-read from the start since we need to pull in the initial NetBIOS
-  // call operation or call response even if the client has not issue a data
-  // read() yet.
-  self._doRead();
 
   return self;
 }
 
-NetbiosSession.prototype._connect = function() {
+NetbiosSession.prototype.connect = function(port, addr, callFrom, callTo, cb) {
   var self = this;
   var ss = self._sessionState;
 
-  ss.socket = net.createConnection(ss.port, ss.address, function() {
-    self._sendRequest();
+  if (ss.mode || ss.socket) {
+    if (typeof cb === 'function') {
+      cb(new Error('Cannot connect Session already active.'));
+    }
+    return;
+  }
+
+  if (typeof port !== 'number') {
+    port = DEFAULT_PORT;
+  }
+
+  ss.mode = 'establishingOut';
+  ss.socket = net.createConnection(port, addr, function() {
+    self._sendRequest(callTo, callFrom, cb);
   });
 
-  ss.socket.on('error', self.emit.bind(self, 'error'));
-  ss.inputStream = new Readable(READABLE_OPTS);
-  ss.inputStream.wrap(ss.socket);
+  self._initInputStream();
 };
 
-NetbiosSession.prototype._sendRequest = function() {
+NetbiosSession.prototype.attach = function(socket, callback) {
+  var ss = this._sessionState;
+
+  if (ss.mode || ss.socket) {
+    if (typeof callback === 'function') {
+      callback(new Error('Cannot attach Session already active.'));
+    }
+    return;
+  }
+
+  ss.mode = 'establishingIn';
+  ss.socket = socket;
+  ss.attachCallback = callback;
+  this._initInputStream();
+  this._doRead();
+};
+
+NetbiosSession.prototype._initInputStream = function() {
+  var ss = this._sessionState;
+  // TODO:  Work around bug in Net.Socket with reading large buffers. Remove
+  //        when node master has been updated.
+  ss.inputStream = new Readable({highWaterMark: con.MAX_TRAILER_LENGTH +
+                                                con.HEADER_LENGTH});
+  ss.inputStream.wrap(ss.socket);
+  ss.inputStream.on('error', this.emit.bind(this, 'error'));
+}
+
+NetbiosSession.prototype._sendRequest = function(callTo, callFrom, callback) {
   var ss = this._sessionState;
   var bytes = 0;
 
@@ -132,17 +141,21 @@ NetbiosSession.prototype._sendRequest = function() {
   // Skip the header for the moment while we wmainlinerite the variable length names
   bytes += con.HEADER_LENGTH;
 
-  var res = ss.callTo.write(buf, bytes);
+  var res = callTo.write(buf, bytes);
   if (res.error) {
-    this.emit('error', res);
+    if (typeof callback === 'function') {
+      callback(res.error);
+    }
     return;
   }
 
   bytes += res.bytesWritten;
 
-  res = ss.callFrom.write(buf, bytes);
+  res = callFrom.write(buf, bytes);
   if (res.error) {
-    this.emit('error', res);
+    if (typeof callback === 'function') {
+      callback(res.error);
+    }
     return;
   };
 
@@ -156,7 +169,12 @@ NetbiosSession.prototype._sendRequest = function() {
   bytes += len
   bytes += trailerLen;
 
+  ss.connectCallback = callback;
+
   ss.socket.write(buf.slice(0, bytes));
+
+  // Start the read flow to begin looking for response packets
+  this._doRead();
 };
 
 NetbiosSession.prototype._read = function(size, callback) {
@@ -292,17 +310,14 @@ NetbiosSession.prototype._readHeader = function() {
       return;
     }
 
-    if (ss.trailerType === 'positive response') {
-      ss.mode = 'established';
-      // TODO: use something other than approveFn() to signal that we are
-      //       connected
-      ss.approveFn();
-    }
-
     ss.trailerType = null;
     ss.trailerLength = 0;
+
+    if (type === 'positive response') {
+      this._handlePositiveResponse();
+    }
   }
-}
+};
 
 NetbiosSession.prototype._readTrailer = function() {
   var ss = this._sessionState;
@@ -321,9 +336,11 @@ NetbiosSession.prototype._readTrailer = function() {
       this._handleRequest(chunk);
     } else if (type === 'message') {
       this._handleMessage(chunk);
+    } else if (type === 'negative response') {
+      this._handleNegativeResponse(chunk);
     }
   }
-}
+};
 
 NetbiosSession.prototype._handleRequest = function(chunk) {
   var self = this;
@@ -331,9 +348,9 @@ NetbiosSession.prototype._handleRequest = function(chunk) {
 
   var nbname = NBName.fromBuffer(chunk, 0);
   if (nbname.error) {
-    // TODO:  send negative response?
-    // TODO:  call callback with error?
-    // TODO:  throw error?
+    if (typeof ss.attachCallback === 'function') {
+      ss.attachCallback(nbname.error);
+    }
     return;
   }
 
@@ -341,9 +358,9 @@ NetbiosSession.prototype._handleRequest = function(chunk) {
 
   nbname = NBName.fromBuffer(chunk, called.bytesRead);
   if (nbname.error) {
-    // TODO:  send negative response?
-    // TODO:  call callback with error?
-    // TODO:  throw error?
+    if (typeof ss.attachCallback === 'function') {
+      ss.attachCallback(nbname.error);
+    }
     return;
   }
 
@@ -352,8 +369,9 @@ NetbiosSession.prototype._handleRequest = function(chunk) {
   // If called/calling names are acceptable send positive response.  If
   // we have no way to check for approval then default to accepting the
   // session.
-  if (typeof ss.approveFn === 'function') {
-    var errorCode = ss.approveFn(called, calling);
+  if (typeof ss.attachCallback === 'function') {
+    // TODO: rework how attach callback signals approve/reject
+    var errorCode = ss.attachCallback(null, called, calling);
 
     // This request is for a bad name, reject
     if (errorCode) {
@@ -363,7 +381,7 @@ NetbiosSession.prototype._handleRequest = function(chunk) {
   }
   ss.mode = 'established';
   self._sendPositiveResponse();
-}
+};
 
 NetbiosSession.prototype._handleMessage = function(chunk) {
   var ss = this._sessionState;
@@ -385,7 +403,54 @@ NetbiosSession.prototype._handleMessage = function(chunk) {
   if (typeof cb === 'function') {
     cb(null, chunk);
   }
-}
+};
+
+NetbiosSession.prototype._handlePositiveResponse = function(chunk) {
+  var ss = this._sessionState;
+
+  if (ss.mode !== 'establishingOut') {
+    return;
+  }
+
+  var cb = ss.connectCallback;
+  ss.connectCallback = null;
+  ss.mode = 'established';
+
+  if (typeof cb === 'function') {
+    cb();
+  }
+};
+
+NetbiosSession.prototype._handleNegativeResponse = function(chunk) {
+  var ss = this._sessionState;
+
+  if (ss.mode !== 'establishingOut') {
+    return;
+  }
+
+  var cb = ss.connectCallback;
+  ss.connectCallback = null;
+
+  if (chunk.length !== 1) {
+    if (typeof cb === 'function') {
+      cb(new Error('Malformed negative response.  Connection failed.'));
+      this.end();
+      return;
+    }
+  }
+
+  var errCode = chunk.bufReadUInt8();
+  var errString = con.ERROR_CODE_TO_STRING[errCode];
+  if (!errString) {
+    errString = 'unknown error';
+  }
+
+  if (typeof cb === 'function') {
+    cb(new Error('Connection failed with response code [' + errString + ']'));
+  }
+
+  this.end();
+};
 
 NetbiosSession.prototype._sendPositiveResponse = function() {
   var ss = this._sessionState;
