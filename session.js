@@ -36,7 +36,8 @@ var util = require('util');
 
 var VALID_TYPES = {
   'establishingIn': { 'request': true },
-  'establishingOut': { 'positive response': true },
+  'establishingOut': { 'positive response': true,
+                       'negative response': true },
   'established': { 'message': true,
                    'keep alive': true }
 };
@@ -49,6 +50,8 @@ var DEFAULT_PORT = 139;
 
 function NetbiosSessionState(session, opts) {
   this.mode = null;
+
+  this.defaultAccept = !!opts.defaultAccept;
 
   this.attachCallback = null;
   this.connectCallback = null;
@@ -343,8 +346,7 @@ NetbiosSession.prototype._readTrailer = function() {
 };
 
 NetbiosSession.prototype._handleRequest = function(chunk) {
-  var self = this;
-  var ss = self._sessionState;
+  var ss = this._sessionState;
 
   var nbname = NBName.fromBuffer(chunk, 0);
   if (nbname.error) {
@@ -354,9 +356,9 @@ NetbiosSession.prototype._handleRequest = function(chunk) {
     return;
   }
 
-  var called = nbname;
+  var callTo = nbname;
 
-  nbname = NBName.fromBuffer(chunk, called.bytesRead);
+  nbname = NBName.fromBuffer(chunk, callTo.bytesRead);
   if (nbname.error) {
     if (typeof ss.attachCallback === 'function') {
       ss.attachCallback(nbname.error);
@@ -364,23 +366,37 @@ NetbiosSession.prototype._handleRequest = function(chunk) {
     return;
   }
 
-  var calling = nbname;
+  var callFrom = nbname;
 
-  // If called/calling names are acceptable send positive response.  If
-  // we have no way to check for approval then default to accepting the
-  // session.
+  // If we have a callback, then make the call passing a request object.
+  // The callback can then use the request object to accept() or reject()
+  // the session.  If neither method is called then we fallback to our
+  // default policy.  Normally this is reject-by-default, but that can
+  // be overriden by passing {defaultAccept: true} to the constructor.
+  var accept = ss.defaultAccept;
+  var errorString = null;
   if (typeof ss.attachCallback === 'function') {
-    // TODO: rework how attach callback signals approve/reject
-    var errorCode = ss.attachCallback(null, called, calling);
-
-    // This request is for a bad name, reject
-    if (errorCode) {
-      self._sendNegativeResponse(errorCode);
-      return;
-    }
+    var request = {
+      callTo: callTo,
+      callFrom: callFrom,
+      accept: function() {
+        accept = true;
+      },
+      reject: function(s) {
+        accept = false;
+        errorString = s;
+      }
+    };
+    ss.attachCallback(null, request);
   }
+
+  if (!accept) {
+    this._sendNegativeResponse(errorString);
+    return;
+  }
+
   ss.mode = 'established';
-  self._sendPositiveResponse();
+  this._sendPositiveResponse();
 };
 
 NetbiosSession.prototype._handleMessage = function(chunk) {
@@ -439,7 +455,7 @@ NetbiosSession.prototype._handleNegativeResponse = function(chunk) {
     }
   }
 
-  var errCode = chunk.bufReadUInt8();
+  var errCode = chunk.readUInt8(0);
   var errString = con.ERROR_CODE_TO_STRING[errCode];
   if (!errString) {
     errString = 'unknown error';
@@ -464,7 +480,7 @@ NetbiosSession.prototype._sendPositiveResponse = function() {
   ss.socket.write(buf);
 };
 
-NetbiosSession.prototype._sendNegativeResponse = function(errorCode) {
+NetbiosSession.prototype._sendNegativeResponse = function(errorString) {
   var ss = this._sessionState;
 
   var buf = new Buffer(con.HEADER_LENGTH + 1);
@@ -473,7 +489,12 @@ NetbiosSession.prototype._sendNegativeResponse = function(errorCode) {
   var len = this._packHeader(buf, bytes, 'negative response', 1);
   bytes += len;
 
-  buf.writeUInt8(con.ERROR_CODE_FROM_STRING[errorCode], bytes);
+  var errorCode = con.ERROR_CODE_FROM_STRING[errorString];
+  if (!errorCode) {
+    errorCode = con.ERROR_CODE_FROM_STRING['Unspecified error'];
+  }
+
+  buf.writeUInt8(errorCode, bytes);
   bytes += 1;
 
   ss.socket.write(buf);

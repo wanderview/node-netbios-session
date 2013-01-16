@@ -30,11 +30,11 @@ var NBName = require('netbios-name');
 
 module.exports.testSession = function(test) {
   var bytes = 1024 * 1024;
-  test.expect(bytes + 1);
+  test.expect(bytes + 2);
   var server = net.createServer();
 
-  var callee = new NBName({name: 'DST', suffix: 0x20});
-  var caller = new NBName({name: 'SRC', suffix: 0x20});
+  var callTo = new NBName({name: 'DST', suffix: 0x20});
+  var callFrom = new NBName({name: 'SRC', suffix: 0x20});
 
   var testBuf = new Buffer(bytes);
   for (var i = 0; i < bytes; ++i) {
@@ -43,12 +43,13 @@ module.exports.testSession = function(test) {
 
   server.on('connection', function(socket) {
     var recv = new Session();
-    recv.attach(socket, function(error, called, calling) {
+    recv.attach(socket, function(error, request) {
       test.equal(error, null);
-      if (called.toString() === callee.toString()){
-        return null;
+      if (request.callTo.toString() === callTo.toString()){
+        request.accept();
+      } else {
+        request.reject('Called name not present');
       }
-      return 'Called name not present';
     });
 
     _testRead(recv, bytes, function(recvBuf) {
@@ -65,7 +66,8 @@ module.exports.testSession = function(test) {
     var port = server.address().port;
 
     var send = new Session();
-    send.connect(port, '127.0.0.1', caller, callee, function(error) {
+    send.connect(port, '127.0.0.1', callFrom, callTo, function(error) {
+      test.equal(error, null);
       send.write(testBuf, null, function() {
         send.end();
       });
