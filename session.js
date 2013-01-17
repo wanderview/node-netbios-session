@@ -34,6 +34,11 @@ var Duplex = require('readable-stream/duplex');
 var net = require('net');
 var util = require('util');
 
+// TODO: Move constants into session.js
+// TODO: Write tests for failure modes
+// TODO: Write README.md
+// TODO: Implement retarget response when we have a use case
+
 var VALID_TYPES = {
   'establishingIn': { 'request': true },
   'establishingOut': { 'positive response': true,
@@ -43,8 +48,6 @@ var VALID_TYPES = {
 };
 
 util.inherits(NetbiosSession, Duplex);
-
-// TODO:  Implement retarget response when we have a use case
 
 var DEFAULT_PORT = 139;
 
@@ -281,10 +284,6 @@ NetbiosSession.prototype._readHeader = function() {
 
     var type = con.TYPE_TO_STRING[t];
     if (!VALID_TYPES[ss.mode][type]) {
-      // TODO: send negative response?
-      // TODO: emit error?
-      // TODO: call readCallback with error???
-
       // Even though this was unexpected, we need to complete reading
       // the trailer to clear the message.  Simply ignore any bytes read.
       type = 'ignore';
@@ -346,7 +345,8 @@ NetbiosSession.prototype._readTrailer = function() {
 };
 
 NetbiosSession.prototype._handleRequest = function(chunk) {
-  var ss = this._sessionState;
+  var self = this;
+  var ss = self._sessionState;
 
   var nbname = NBName.fromBuffer(chunk, 0);
   if (nbname.error) {
@@ -370,33 +370,39 @@ NetbiosSession.prototype._handleRequest = function(chunk) {
 
   // If we have a callback, then make the call passing a request object.
   // The callback can then use the request object to accept() or reject()
-  // the session.  If neither method is called then we fallback to our
-  // default policy.  Normally this is reject-by-default, but that can
-  // be overriden by passing {defaultAccept: true} to the constructor.
-  var accept = ss.defaultAccept;
+  // the session.  One of these methods must be made, but it can occur
+  // asynchronously at a later time.  If a callback is not supplied then
+  // the default policy is applied.  Normally this is reject by default,
+  // but this can be overriden by passing {defaultAccept: true} to the
+  // constructor.
   var errorString = null;
   if (typeof ss.attachCallback === 'function') {
     var request = {
       callTo: callTo,
       callFrom: callFrom,
       accept: function() {
-        accept = true;
+        ss.mode = 'established';
+        self._sendPositiveResponse();
+        request.accept = null;
+        request.reject = null;
       },
       reject: function(s) {
-        accept = false;
-        errorString = s;
+        self._sendNegativeResponse(s);
+        request.accept = null;
+        request.reject = null;
       }
     };
     ss.attachCallback(null, request);
-  }
-
-  if (!accept) {
-    this._sendNegativeResponse(errorString);
     return;
   }
 
-  ss.mode = 'established';
-  this._sendPositiveResponse();
+  // No callback to check for acceptance, so use the default policy
+  if (!ss.acceptDefault) {
+    ss.mode = 'established';
+    self._sendPositiveResponse();
+  } else {
+    self._sendNegativeResponse(null);
+  }
 };
 
 NetbiosSession.prototype._handleMessage = function(chunk) {
