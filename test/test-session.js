@@ -26,52 +26,136 @@
 var Session = require('../session');
 
 var net = require('net');
+var util = require('util');
 var NBName = require('netbios-name');
 
-module.exports.testSession = function(test) {
-  var bytes = 1024 * 1024;
-  test.expect(bytes + 2);
-  var server = net.createServer();
+module.exports.testAccept = function(test) {
+  test.expect(2);
 
-  var callTo = new NBName({name: 'DST', suffix: 0x20});
-  var callFrom = new NBName({name: 'SRC', suffix: 0x20});
+  var attachCallback = function(error, request) {
+    test.equal(error, null);
+    request.accept();
+  };
+
+  var srcCallback = function(error, stream) {
+    test.equal(error, null);
+    stream.end();
+    test.done();
+  };
+
+  var dstCallback = function(error, stream, server) {
+    server.close();
+  };
+
+  _doConnection({
+    srcName: 'SRC',
+    dstName: 'DST',
+    attachCallback: attachCallback,
+    srcCallback: srcCallback,
+    dstCallback: dstCallback
+  });
+};
+
+module.exports.testRejectMessage = function(test) {
+  test.expect(2);
+
+  var errorString = 'Not listening on called name';
+
+  var attachCallback = function(error, request) {
+    test.equal(error, null);
+    request.reject(errorString);
+  };
+
+  var srcCallback = function(error, stream) {
+    test.equal(error.message, 'Connection failed with response code [' + errorString + ']');
+    test.done();
+  };
+
+  var dstCallback = function(error, stream, server) {
+    server.close();
+  };
+
+  _doConnection({
+    srcName: 'SRC',
+    dstName: 'DST',
+    attachCallback: attachCallback,
+    srcCallback: srcCallback,
+    dstCallback: dstCallback
+  });
+};
+
+module.exports.testRejectNoMessage = function(test) {
+  test.expect(2);
+
+  var attachCallback = function(error, request) {
+    test.equal(error, null);
+    request.reject();
+  };
+
+  var srcCallback = function(error, stream) {
+    test.equal(error.message, 'Connection failed with response code [Unspecified error]');
+    test.done();
+  };
+
+  var dstCallback = function(error, stream, server) {
+    server.close();
+  };
+
+  _doConnection({
+    srcName: 'SRC',
+    dstName: 'DST',
+    attachCallback: attachCallback,
+    srcCallback: srcCallback,
+    dstCallback: dstCallback
+  });
+};
+
+module.exports.testBulkData = function(test) {
+  var bytes = 1024 * 1024;
+  test.expect(bytes + 3);
+
+  var srcName = 'SRC';
+  var dstName = 'DST';
 
   var testBuf = new Buffer(bytes);
   for (var i = 0; i < bytes; ++i) {
     testBuf.writeUInt8((i % 256), i);
   }
 
-  server.on('connection', function(socket) {
-    var recv = new Session();
-    recv.attach(socket, function(error, request) {
-      test.equal(error, null);
-      if (request.callTo.toString() === callTo.toString()){
-        request.accept();
-      } else {
-        request.reject('Called name not present');
-      }
-    });
+  var attachCallback = function(error, request) {
+    test.equal(error, null);
+    if (request.callTo.name === dstName) {
+      request.accept();
+    } else {
+      request.reject('Called name not present');
+    }
+  };
 
-    _testRead(recv, bytes, function(recvBuf) {
+  var srcCallback = function(error, stream) {
+    test.equal(error, null);
+    stream.write(testBuf, null, function() {
+      stream.end();
+    });
+  };
+
+  var dstCallback = function(error, stream, server) {
+    test.equal(error, null);
+    _testRead(stream, bytes, function(recvBuf) {
       for (var i = 0; i < bytes && i < recvBuf.length; ++i) {
         test.equal(recvBuf[i], testBuf[i]);
       };
       server.close();
-      recv.end();
+      stream.end();
       test.done();
     });
-  });
+  };
 
-  server.listen(0, '127.0.0.1', function() {
-    var port = server.address().port;
-
-    var send = new Session();
-    send.connect(port, '127.0.0.1', callFrom, callTo, function(error) {
-      test.equal(error, null);
-      send.write(testBuf, null, function() {
-        send.end();
-      });
-    });
+  _doConnection({
+    srcName: srcName,
+    dstName: dstName,
+    attachCallback: attachCallback,
+    srcCallback: srcCallback,
+    dstCallback: dstCallback
   });
 };
 
@@ -82,4 +166,31 @@ function _testRead(readable, len, callback) {
     return;
   }
   callback(testBuf);
+}
+
+function _doConnection(opts) {
+  var server = net.createServer();
+
+  var callTo = new NBName({name: opts.dstName, suffix: 0x20});
+  var callFrom = new NBName({name: opts.srcName, suffix: 0x20});
+
+  server.on('connection', function(socket) {
+    var recv = new Session();
+    recv.attach(socket, opts.attachCallback);
+
+    if (typeof opts.dstCallback === 'function') {
+      opts.dstCallback(null, recv, server);
+    }
+  });
+
+  server.listen(0, '127.0.0.1', function() {
+    var port = server.address().port;
+
+    var send = new Session();
+    send.connect(port, '127.0.0.1', callFrom, callTo, function(error) {
+      if (typeof opts.srcCallback === 'function') {
+        opts.srcCallback(error, send);
+      }
+    });
+  });
 }
