@@ -503,5 +503,12 @@ NetbiosSession.prototype._sendNegativeResponse = function(errorString) {
   buf.writeUInt8(errorCode, bytes);
   bytes += 1;
 
-  ss.socket.write(buf);
+  // Write out the negative response back to the client trying to connect
+  // to us.  Since this represents a session failure, automatically close
+  // the stream once the bytes have been sent.
+  if(ss.socket.write(buf)) {
+    this.end();
+  } else {
+    ss.socket.once('drain', this.end.bind(this));
+  }
 };
