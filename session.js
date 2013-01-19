@@ -35,7 +35,6 @@ var net = require('net');
 var util = require('util');
 
 // TODO: Move constants into session.js
-// TODO: Write README.md
 // TODO: Implement retarget response when we have a use case
 
 var VALID_TYPES = {
