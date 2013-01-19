@@ -3,6 +3,10 @@
 A 100% javascript implemention of the NetBIOS session protocol defined in
 [RFC1001][] and [RFC1002][].
 
+NOTE: This module needs major rework.  Its currently designed around a streams
+API, but NetBIOS sessions and protocols that use it, like SMB, are message
+oriented.  Expect the API to change drastically.
+
 [![Build Status](https://travis-ci.org/wanderview/node-netbios-session.png)](https://travis-ci.org/wanderview/node-netbios-session)
 
 ## Example
