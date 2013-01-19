@@ -25,16 +25,12 @@
 
 module.exports = NetbiosSession;
 
-var con = require('./lib/constant');
 var NBName = require('netbios-name');
-
 var Readable = require('readable-stream');
 var Duplex = require('readable-stream/duplex');
-
 var net = require('net');
 var util = require('util');
 
-// TODO: Move constants into session.js
 // TODO: Implement retarget response when we have a use case
 
 var VALID_TYPES = {
@@ -45,9 +41,50 @@ var VALID_TYPES = {
                    'keep alive': true }
 };
 
-util.inherits(NetbiosSession, Duplex);
-
 var DEFAULT_PORT = 139;
+
+var TYPE_TO_STRING = {
+  0x00: 'message',
+  0x81: 'request',
+  0x82: 'positive response',
+  0x83: 'negative response',
+  0x84: 'retarget response',
+  0x85: 'keep alive'
+};
+
+var TYPE_FROM_STRING = {
+  'message': 0x00,
+  'request': 0x81,
+  'positive response': 0x82,
+  'negative response': 0x83,
+  'retarget response': 0x84,
+  'keep alive': 0x85
+};
+
+var FLAGS_E_MASK = 0x80;
+var FLAGS_RESERVED_MASK = 0x7f;
+
+var ERROR_CODE_TO_STRING = {
+  0x80: 'Not listening on called name',
+  0x81: 'Not listening for calling name',
+  0x82: 'Called name not present',
+  0x83: 'Called name present, but insufficient resources',
+  0x8f: 'Unspecified error'
+};
+
+var ERROR_CODE_FROM_STRING = {
+  'Not listening on called name': 0x80,
+  'Not listening for calling name': 0x81,
+  'Called name not present': 0x82,
+  'Called name present, but insufficient resources': 0x83,
+  'Unspecified error': 0x8f
+};
+
+var EXTENSION_LENGTH = 1 << 16;
+var MAX_TRAILER_LENGTH = (1 << 17) - 1;
+var HEADER_LENGTH = 4;
+
+util.inherits(NetbiosSession, Duplex);
 
 function NetbiosSessionState(session, opts) {
   this.mode = null;
@@ -130,8 +167,8 @@ NetbiosSession.prototype._initInputStream = function() {
   var ss = this._sessionState;
   // TODO:  Work around bug in Net.Socket with reading large buffers. Remove
   //        when node master has been updated.
-  ss.inputStream = new Readable({highWaterMark: con.MAX_TRAILER_LENGTH +
-                                                con.HEADER_LENGTH});
+  ss.inputStream = new Readable({highWaterMark: MAX_TRAILER_LENGTH +
+                                                HEADER_LENGTH});
   ss.inputStream.wrap(ss.socket);
   ss.inputStream.on('error', this.emit.bind(this, 'error'));
 }
@@ -140,10 +177,10 @@ NetbiosSession.prototype._sendRequest = function(callTo, callFrom, callback) {
   var ss = this._sessionState;
   var bytes = 0;
 
-  var buf = new Buffer(con.HEADER_LENGTH + con.MAX_TRAILER_LENGTH);
+  var buf = new Buffer(HEADER_LENGTH + MAX_TRAILER_LENGTH);
 
   // Skip the header for the moment while we wmainlinerite the variable length names
-  bytes += con.HEADER_LENGTH;
+  bytes += HEADER_LENGTH;
 
   var res = callTo.write(buf, bytes);
   if (res.error) {
@@ -165,7 +202,7 @@ NetbiosSession.prototype._sendRequest = function(callTo, callFrom, callback) {
 
   bytes += res.bytesWritten;
 
-  var trailerLen = bytes - con.HEADER_LENGTH;
+  var trailerLen = bytes - HEADER_LENGTH;
 
   // Now go back and write header
   bytes = 0;
@@ -208,10 +245,10 @@ NetbiosSession.prototype._writeChunk = function(chunk, offset, callback) {
   var ss = self._sessionState;
 
   // latch length of this message to maximum allowed by protocol header
-  var msgLength = Math.min(chunk.length - offset, con.MAX_TRAILER_LENGTH);
+  var msgLength = Math.min(chunk.length - offset, MAX_TRAILER_LENGTH);
 
   // Write the header out for this bit of the chunk
-  var buf = new Buffer(con.HEADER_LENGTH);
+  var buf = new Buffer(HEADER_LENGTH);
   self._packHeader(buf, 0, 'message', msgLength);
   _writeFlow(ss.socket, buf, function() {
 
@@ -235,14 +272,14 @@ function _writeFlow(stream, buf, callback) {
 }
 
 NetbiosSession.prototype._packHeader = function(buf, offset, typeString, length) {
-  var type = con.TYPE_FROM_STRING[typeString];
+  var type = TYPE_FROM_STRING[typeString];
   buf.writeUInt8(type, offset);
   offset += 1;
 
   var flags = 0;
-  if (length >= con.EXTENSION_LENGTH) {
-    flags |= con.FLAGS_E_MASK;
-    length -= con.EXTENSION_LENGTH;
+  if (length >= EXTENSION_LENGTH) {
+    flags |= FLAGS_E_MASK;
+    length -= EXTENSION_LENGTH;
   }
   buf.writeUInt8(flags, offset);
   offset += 1;
@@ -272,7 +309,7 @@ NetbiosSession.prototype._doRead = function() {
 NetbiosSession.prototype._readHeader = function() {
   var ss = this._sessionState;
 
-  var chunk = ss.inputStream.read(con.HEADER_LENGTH);
+  var chunk = ss.inputStream.read(HEADER_LENGTH);
   if (chunk) {
     var bytes = 0;
 
@@ -280,7 +317,7 @@ NetbiosSession.prototype._readHeader = function() {
     var t = chunk.readUInt8(bytes);
     bytes += 1;
 
-    var type = con.TYPE_TO_STRING[t];
+    var type = TYPE_TO_STRING[t];
     if (!VALID_TYPES[ss.mode][type]) {
       // Even though this was unexpected, we need to complete reading
       // the trailer to clear the message.  Simply ignore any bytes read.
@@ -298,8 +335,8 @@ NetbiosSession.prototype._readHeader = function() {
 
     // if the extension flag is set, then add it as a high order bit to the
     // length
-    if (flags & con.FLAGS_E_MASK) {
-      length += con.EXTENSION_LENGTH;
+    if (flags & FLAGS_E_MASK) {
+      length += EXTENSION_LENGTH;
     }
 
     ss.trailerLength = length;
@@ -460,7 +497,7 @@ NetbiosSession.prototype._handleNegativeResponse = function(chunk) {
   }
 
   var errCode = chunk.readUInt8(0);
-  var errString = con.ERROR_CODE_TO_STRING[errCode];
+  var errString = ERROR_CODE_TO_STRING[errCode];
   if (!errString) {
     errString = 'unknown error';
   }
@@ -475,7 +512,7 @@ NetbiosSession.prototype._handleNegativeResponse = function(chunk) {
 NetbiosSession.prototype._sendPositiveResponse = function() {
   var ss = this._sessionState;
 
-  var buf = new Buffer(con.HEADER_LENGTH);
+  var buf = new Buffer(HEADER_LENGTH);
   var bytes = 0;
 
   var len = this._packHeader(buf, bytes, 'positive response', 0);
@@ -487,15 +524,15 @@ NetbiosSession.prototype._sendPositiveResponse = function() {
 NetbiosSession.prototype._sendNegativeResponse = function(errorString) {
   var ss = this._sessionState;
 
-  var buf = new Buffer(con.HEADER_LENGTH + 1);
+  var buf = new Buffer(HEADER_LENGTH + 1);
   var bytes = 0;
 
   var len = this._packHeader(buf, bytes, 'negative response', 1);
   bytes += len;
 
-  var errorCode = con.ERROR_CODE_FROM_STRING[errorString];
+  var errorCode = ERROR_CODE_FROM_STRING[errorString];
   if (!errorCode) {
-    errorCode = con.ERROR_CODE_FROM_STRING['Unspecified error'];
+    errorCode = ERROR_CODE_FROM_STRING['Unspecified error'];
   }
 
   buf.writeUInt8(errorCode, bytes);
