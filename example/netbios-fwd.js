@@ -21,45 +21,46 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-'use strict'
+'use strict';
 
-var Session = require('../session')
+var Session = require('../session');
 var net = require('net');
-
-// Set this to only accept a certain name
-var NAME = null;
 
 var FWD_PORT = 445;
 var FWD_HOST = '127.0.0.1';
 
 var server = net.createServer(function(socket) {
-  console.log('---> new connection from [' + socket.remoteAddress + ']');
-  var session = new Session();
-  session.attach(socket, function(error, request) {
-    if (error) {
-      console.log('---> attach error [' + error + ']');
-      return;
-    }
+  var sessionIn = new Session({paused: true, autoAccept: true});
 
-    console.log('---> new call to [' + request.callTo + '] from [' +
-                request.callFrom + ']');
+  sessionIn.on('connect', function() {
+    var sessionOut = new Session({direct: true});
 
-    if (NAME && request.callTo.name !== NAME) {
-      console.log('---> rejecting');
-      request.reject('Not listening on called name');
-      return;
-    }
+    var errorHandler = function(error) {
+      console.log(error);
+      sessionIn.end();
+      sessionOut.end();
+    };
+    sessionIn.on('error', errorHandler);
+    sessionOut.on('error', errorHandler);
 
-    console.log('---> accepting');
-    request.accept();
+    sessionIn.on('message', _forward.bind(null, sessionOut, sessionIn));
+    sessionOut.on('message', _forward.bind(null, sessionIn, sessionOut));
 
-    var output = new net.createConnection(FWD_PORT, FWD_HOST, function() {
-      console.log('---> forwarding to [' + FWD_HOST + '] on port [' + FWD_PORT +
-                  ']');
-      session.pipe(output);
-    });
+    sessionOut.on('connect', sessionIn.resume.bind(sessionIn));
+
+    sessionOut.connect(FWD_PORT, FWD_HOST);
   });
+
+  sessionIn.attach(socket);
 });
+
+function _forward(dst, src, msg) {
+  var flushed = dst.write(msg);
+  if (!flushed) {
+    src.pause();
+    dst.once('drain', src.resume.bind(src));
+  }
+}
 
 server.listen(139, function() {
   console.log('netbios-fwd started');

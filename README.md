@@ -74,9 +74,18 @@ Create a new NetbiosSession instance with the given `options`.
 
 * `options` {Object | null} Optional configuration options for the session.
   Possible values are:
-  * `defaultAccept` {Boolean} If set to `true`, then the session will default
+  * `autoAccept` {Boolean} If set to `true`, then the session will default
     to accepting all requests if an `attach()` `callback` is not provided.
     Default value is `false`
+  * `direct` {Boolean} Use direct connection mode if this option is set.
+    This means that the session establishment handshake should not be
+    performed.  Instead, consider the session connected as soon as we have
+    a valid TCP socket.  This is useful for protocols like SMB that still
+    want a NetBIOS message header, but do not use the request/response
+    commands.
+  * `paused` {Boolean} If set the session will start in the paused condition.
+    This means that the session can connect or attach as needed, but no
+    `'message'` events will occur until `resume()` is called.
 
 ### session.attach(socket, callback)
 
@@ -94,7 +103,9 @@ policy will be used to either reject or accept.
 * `socket` {Socket Object} The socket to attach to.  This socket should
   already be bound and connected.
 * `callback` {Function | null} An optional callback that is used to signal
-  that a request has occured and to approve or deny the request.
+  that a request has occured and to approve or deny the request.  NOTE: If the
+  `direct` option was set in the session constructor, then this callback will
+  not be called.
   * `error` {Error Object} Provided if an error occurs during the attachment.
   * `request` {Object} An object describing the session request and providing
     method to allow the `callback` to `accept()` or `reject()` the request.
@@ -160,7 +171,9 @@ more data to the session.
 ### session.pause()
 
 Stop accepting messages from the remote session peer.  This can be used
-to implement back pressure if the messages are coming too fast.
+to implement back pressure if the messages are coming too fast.  Note,
+the session can still negotiate the connection even if paused, so there
+may still be network traffic if the session is not yet connected.
 
 ### session.resume()
 

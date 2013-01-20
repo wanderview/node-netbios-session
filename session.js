@@ -90,13 +90,13 @@ util.inherits(NetbiosSession, EventEmitter);
 function NetbiosSessionState(session, opts) {
   this.mode = null;
 
-  this.defaultAccept = !!opts.defaultAccept;
+  this.direct = !!opts.direct;
+  this.autoAccept = !!opts.autoAccept;
 
-  this.paused = false;
+  this.paused = !!opts.paused;
 
   this.attachCallback = null;
   this.connectCallback = null;
-  this.readCallback = null;
 
   this.trailerType = null;
   this.trailerLength = 0;
@@ -143,6 +143,14 @@ NetbiosSession.prototype.connect = function(port, addr, callFrom, callTo, cb) {
 
   ss.mode = 'establishingOut';
   ss.socket = net.createConnection(port, addr, function() {
+    if (ss.direct) {
+      if (typeof cb === 'function') {
+        cb();
+      }
+      self._established();
+      self._doRead();
+      return;
+    }
     self._sendRequest(callTo, callFrom, cb);
   });
 
@@ -159,10 +167,17 @@ NetbiosSession.prototype.attach = function(socket, callback) {
     return;
   }
 
-  ss.mode = 'establishingIn';
   ss.socket = socket;
-  ss.attachCallback = callback;
   this._initInputStream();
+
+  if (ss.direct) {
+    this._established();
+    this._doRead();
+    return;
+  }
+
+  ss.mode = 'establishingIn';
+  ss.attachCallback = callback;
   this._doRead();
 };
 
@@ -321,13 +336,18 @@ NetbiosSession.prototype._packHeader = function(buf, offset, typeString, length)
 NetbiosSession.prototype._doRead = function() {
   var ss = this._sessionState;
 
-  if (!ss.readFunc()) {
-    if (!ss.paused) {
-      ss.inputStream.once('readable', this._doRead.bind(this));
-    }
-  } else if (!ss.paused) {
-    process.nextTick(this._doRead.bind(this));
+  var complete = ss.readFunc();
+
+  if (ss.mode === 'established' && ss.paused) {
+    return;
   }
+
+  if (!complete) {
+    ss.inputStream.once('readable', this._doRead.bind(this));
+    return;
+  }
+
+  this._doRead();
 }
 
 NetbiosSession.prototype._readHeader = function() {
@@ -419,7 +439,6 @@ NetbiosSession.prototype._handleRequest = function(chunk) {
     if (typeof ss.attachCallback === 'function') {
       ss.attachCallback(nbname.error);
     }
-    return;
   }
 
   var callTo = nbname;
@@ -439,7 +458,7 @@ NetbiosSession.prototype._handleRequest = function(chunk) {
   // the session.  One of these methods must be made, but it can occur
   // asynchronously at a later time.  If a callback is not supplied then
   // the default policy is applied.  Normally this is reject by default,
-  // but this can be overriden by passing {defaultAccept: true} to the
+  // but this can be overriden by passing {autoAccept: true} to the
   // constructor.
   var errorString = null;
   if (typeof ss.attachCallback === 'function') {
