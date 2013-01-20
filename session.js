@@ -24,10 +24,11 @@
 'use strict';
 
 module.exports = NetbiosSession;
+module.exports.MAX_MESSAGE_LENGTH = MAX_TRAILER_LENGTH;
 
 var NBName = require('netbios-name');
+var EventEmitter = require('events').EventEmitter;
 var Readable = require('readable-stream');
-var Duplex = require('readable-stream/duplex');
 var net = require('net');
 var util = require('util');
 
@@ -84,12 +85,14 @@ var EXTENSION_LENGTH = 1 << 16;
 var MAX_TRAILER_LENGTH = (1 << 17) - 1;
 var HEADER_LENGTH = 4;
 
-util.inherits(NetbiosSession, Duplex);
+util.inherits(NetbiosSession, EventEmitter);
 
 function NetbiosSessionState(session, opts) {
   this.mode = null;
 
   this.defaultAccept = !!opts.defaultAccept;
+
+  this.paused = false;
 
   this.attachCallback = null;
   this.connectCallback = null;
@@ -107,7 +110,7 @@ function NetbiosSession(opts) {
 
   opts = opts || {};
 
-  Duplex.call(self, opts);
+  EventEmitter.call(self, opts);
 
   self._sessionState = new NetbiosSessionState(self, opts);
 
@@ -163,6 +166,18 @@ NetbiosSession.prototype.attach = function(socket, callback) {
   this._doRead();
 };
 
+NetbiosSession.prototype.pause = function() {
+  this._sessionState.paused = true;
+};
+
+NetbiosSession.prototype.resume = function() {
+  var ss = this._sessionState;
+  if (ss.paused) {
+    ss.paused = false;
+    process.nextTick(this._doRead.bind(this));
+  }
+};
+
 NetbiosSession.prototype._initInputStream = function() {
   var ss = this._sessionState;
   // TODO:  Work around bug in Net.Socket with reading large buffers. Remove
@@ -171,6 +186,7 @@ NetbiosSession.prototype._initInputStream = function() {
                                                 HEADER_LENGTH});
   ss.inputStream.wrap(ss.socket);
   ss.inputStream.on('error', this.emit.bind(this, 'error'));
+  ss.inputStream.on('end', this.emit.bind(this, 'end'));
 }
 
 NetbiosSession.prototype._sendRequest = function(callTo, callFrom, callback) {
@@ -218,58 +234,70 @@ NetbiosSession.prototype._sendRequest = function(callTo, callFrom, callback) {
   this._doRead();
 };
 
-NetbiosSession.prototype._read = function(size, callback) {
+NetbiosSession.prototype.write = function(msg, callback) {
   var ss = this._sessionState;
 
-  if (ss.readCallback) {
-    throw new Error('Cannot call _read() again before previous callback occurs');
-  }
-
-  ss.readCallback = callback;
-
-  this._doRead();
-}
-
-NetbiosSession.prototype._write = function(chunk, callback) {
-  // Each NetBIOS session message is limited to a maximum number of bytes
-  // due to the size of the length field in the header.  Therefore we
-  // may not be able to write this chunk out in one message.  To handle
-  // this situation iterator over the chunk and write out a header for
-  // each section equaling this maximum message size.
-
-  this._writeChunk(chunk, 0, callback);
-};
-
-NetbiosSession.prototype._writeChunk = function(chunk, offset, callback) {
-  var self = this;
-  var ss = self._sessionState;
-
-  // latch length of this message to maximum allowed by protocol header
-  var msgLength = Math.min(chunk.length - offset, MAX_TRAILER_LENGTH);
-
-  // Write the header out for this bit of the chunk
-  var buf = new Buffer(HEADER_LENGTH);
-  self._packHeader(buf, 0, 'message', msgLength);
-  _writeFlow(ss.socket, buf, function() {
-
-    // Write the trailer out.  When done, either write the next part of
-    // the chunk out or call the original _write() completion callback
-    var end = offset + msgLength;
-    var completeHook = callback;
-    if (end < chunk.length) {
-      completeHook = self._writeChunk.bind(self, chunk, end, callback);
+  if (msg.length > MAX_TRAILER_LENGTH) {
+    var error = new Error('Message length [' + msg.length +
+                          '] exceeds maximum [' + MAX_TRAILER_LENGTH + ']');
+    this.emit('error', error);
+    if (typeof callback === 'function') {
+      callback(error);
     }
-    _writeFlow(ss.socket, chunk.slice(offset, end), completeHook);
-  });
+
+    return true;
+  }
+
+  var buf = new Buffer(HEADER_LENGTH);
+  this._packHeader(buf, 0, 'message', msg.length);
+
+  var flushed = ss.socket.write(buf);
+
+  if (!flushed) {
+    ss.needDrain = true;
+    ss.socket.once('drain', this._writeMsg.bind(this, msg, callback));
+    return false;
+  }
+
+  return this._writeMsg(msg, callback);
 };
 
-function _writeFlow(stream, buf, callback) {
-  if (stream.write(buf)) {
-    callback();
-    return;
+NetbiosSession.prototype._writeMsg = function(msg, callback) {
+  var ss = this._sessionState;
+
+  var flushed = ss.socket.write(msg);
+
+  if (!flushed) {
+    ss.needDrain = true;
+    ss.socket.once('drain', this._doDrain.bind(this, callback));
+    return false;
   }
-  stream.once('drain', callback);
+
+  this._doDrain(callback);
+  return true;
+};
+
+NetbiosSession.prototype._doDrain = function(callback) {
+  var ss = this._sessionState;
+  if (ss.needDrain) {
+    ss.needDrain = false;
+    this.emit('drain');
+  }
+
+  if (typeof callback === 'function') {
+    callback();
+  }
 }
+
+NetbiosSession.prototype.end = function() {
+  var ss = this._sessionState;
+  if (ss.socket) {
+    ss.mode = null;
+    ss.paused = false;
+    ss.socket.end();
+    ss.socket = null;
+  }
+};
 
 NetbiosSession.prototype._packHeader = function(buf, offset, typeString, length) {
   var type = TYPE_FROM_STRING[typeString];
@@ -293,16 +321,12 @@ NetbiosSession.prototype._packHeader = function(buf, offset, typeString, length)
 NetbiosSession.prototype._doRead = function() {
   var ss = this._sessionState;
 
-  ss.readFunc();
-
-  // We need to keep reading if:
-  //  - we are still trying to establish a NetBIOS call
-  //  - we still have bytes left to read in the trailer, meaning a particular
-  //    NetBIOS message has only been partially read
-  //  - we have a callback registered from our parent reader indicating there
-  //    is an outstanding read() in progress
-  if (ss.mode !== 'established' || ss.trailerLength > 0 || ss.readCallback) {
-    ss.inputStream.once('readable', this._doRead.bind(this));
+  if (!ss.readFunc()) {
+    if (!ss.paused) {
+      ss.inputStream.once('readable', this._doRead.bind(this));
+    }
+  } else if (!ss.paused) {
+    process.nextTick(this._doRead.bind(this));
   }
 }
 
@@ -310,73 +334,80 @@ NetbiosSession.prototype._readHeader = function() {
   var ss = this._sessionState;
 
   var chunk = ss.inputStream.read(HEADER_LENGTH);
-  if (chunk) {
-    var bytes = 0;
-
-    // 8-bit type
-    var t = chunk.readUInt8(bytes);
-    bytes += 1;
-
-    var type = TYPE_TO_STRING[t];
-    if (!VALID_TYPES[ss.mode][type]) {
-      // Even though this was unexpected, we need to complete reading
-      // the trailer to clear the message.  Simply ignore any bytes read.
-      type = 'ignore';
-    }
-    ss.trailerType = type;
-
-    // 8-bit flags
-    var flags = chunk.readUInt8(bytes);
-    bytes += 1;
-
-    // 16-bit length of following trailer (plus 1-bit from the 8-bit flags above)
-    var length = chunk.readUInt16BE(bytes);
-    bytes += 2;
-
-    // if the extension flag is set, then add it as a high order bit to the
-    // length
-    if (flags & FLAGS_E_MASK) {
-      length += EXTENSION_LENGTH;
-    }
-
-    ss.trailerLength = length;
-
-    if (ss.trailerLength > 0) {
-      ss.readFunc = this._readTrailer.bind(this);
-      ss.readFunc();
-      return;
-    }
-
-    ss.trailerType = null;
-    ss.trailerLength = 0;
-
-    if (type === 'positive response') {
-      this._handlePositiveResponse();
-    }
+  if (!chunk) {
+    return false;
   }
+
+  var bytes = 0;
+
+  // 8-bit type
+  var t = chunk.readUInt8(bytes);
+  bytes += 1;
+
+  var type = TYPE_TO_STRING[t];
+  if (!VALID_TYPES[ss.mode][type]) {
+    // Even though this was unexpected, we need to complete reading
+    // the trailer to clear the message.  Simply ignore any bytes read.
+    type = 'ignore';
+  }
+  ss.trailerType = type;
+
+  // 8-bit flags
+  var flags = chunk.readUInt8(bytes);
+  bytes += 1;
+
+  // 16-bit length of following trailer (plus 1-bit from the 8-bit flags above)
+  var length = chunk.readUInt16BE(bytes);
+  bytes += 2;
+
+  // if the extension flag is set, then add it as a high order bit to the
+  // length
+  if (flags & FLAGS_E_MASK) {
+    length += EXTENSION_LENGTH;
+  }
+
+  ss.trailerLength = length;
+
+  if (ss.trailerLength > 0) {
+    ss.readFunc = this._readTrailer.bind(this);
+    return ss.readFunc();
+  }
+
+  ss.trailerType = null;
+  ss.trailerLength = 0;
+
+  if (type === 'positive response') {
+    this._handlePositiveResponse();
+  }
+
+  return true;
 };
 
 NetbiosSession.prototype._readTrailer = function() {
   var ss = this._sessionState;
 
   var chunk = ss.inputStream.read(ss.trailerLength);
-  if (chunk) {
-    var type = ss.trailerType;
-
-    ss.readFunc = this._readHeader.bind(this);
-    ss.trailerType = null;
-    ss.trailerLength = 0;
-
-    // Process the trailer data based on the message type.  Ignore keep alives
-    // and unexpected types.  Just consume the trailer to clear the message.
-    if (type === 'request') {
-      this._handleRequest(chunk);
-    } else if (type === 'message') {
-      this._handleMessage(chunk);
-    } else if (type === 'negative response') {
-      this._handleNegativeResponse(chunk);
-    }
+  if (!chunk) {
+    return false;
   }
+
+  var type = ss.trailerType;
+
+  ss.readFunc = this._readHeader.bind(this);
+  ss.trailerType = null;
+  ss.trailerLength = 0;
+
+  // Process the trailer data based on the message type.  Ignore keep alives
+  // and unexpected types.  Just consume the trailer to clear the message.
+  if (type === 'request') {
+    this._handleRequest(chunk);
+  } else if (type === 'message') {
+    this._handleMessage(chunk);
+  } else if (type === 'negative response') {
+    this._handleNegativeResponse(chunk);
+  }
+
+  return true;
 };
 
 NetbiosSession.prototype._handleRequest = function(chunk) {
@@ -416,7 +447,7 @@ NetbiosSession.prototype._handleRequest = function(chunk) {
       callTo: callTo,
       callFrom: callFrom,
       accept: function() {
-        ss.mode = 'established';
+        self._established();
         self._sendPositiveResponse();
         request.accept = null;
         request.reject = null;
@@ -433,33 +464,20 @@ NetbiosSession.prototype._handleRequest = function(chunk) {
 
   // No callback to check for acceptance, so use the default policy
   if (!ss.acceptDefault) {
-    ss.mode = 'established';
+    self._established();
     self._sendPositiveResponse();
   } else {
     self._sendNegativeResponse(null);
   }
 };
 
+NetbiosSession.prototype._established = function() {
+  this._sessionState.mode = 'established';
+  this.emit('connect');
+};
+
 NetbiosSession.prototype._handleMessage = function(chunk) {
-  var ss = this._sessionState;
-
-  // Since this represents a basic data payload, just pass any bytes read
-  // back to the client making the read() function.
-  //
-  // If there was no outstanding read() callback, then just ignore these
-  // bytes.  This should only happen if we get a data message before the
-  // session is fully established.  This should not happen given our earlier
-  // checks for message type validity based on our mode.
-  //
-  // NOTE: We must clear our state before calling the callback function
-  //       since it may directly lead to another _read() call.
-
-  var cb = ss.readCallback;
-  ss.readCallback = null;
-
-  if (typeof cb === 'function') {
-    cb(null, chunk);
-  }
+  this.emit('message', chunk);
 };
 
 NetbiosSession.prototype._handlePositiveResponse = function(chunk) {
@@ -471,7 +489,7 @@ NetbiosSession.prototype._handlePositiveResponse = function(chunk) {
 
   var cb = ss.connectCallback;
   ss.connectCallback = null;
-  ss.mode = 'established';
+  this._established();
 
   if (typeof cb === 'function') {
     cb();

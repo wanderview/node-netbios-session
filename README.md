@@ -3,10 +3,6 @@
 A 100% javascript implemention of the NetBIOS session protocol defined in
 [RFC1001][] and [RFC1002][].
 
-NOTE: This module needs major rework.  Its currently designed around a streams
-API, but NetBIOS sessions and protocols that use it, like SMB, are message
-oriented.  Expect the API to change drastically.
-
 [![Build Status](https://travis-ci.org/wanderview/node-netbios-session.png)](https://travis-ci.org/wanderview/node-netbios-session)
 
 ## Example
@@ -15,8 +11,6 @@ oriented.  Expect the API to change drastically.
     var net = require('net');
 
     var NAME = null;
-    var FWD_PORT = 445;
-    var FWD_HOST = '127.0.0.1';
 
     var server = net.createServer(function(socket) {
       console.log('---> new connection from [' + socket.remoteAddress + ']');
@@ -36,19 +30,17 @@ oriented.  Expect the API to change drastically.
           return;
         }
 
+        session.on('message', function(msg) {
+          console.log('---> received a message with [' + msg.length + '] bytes');
+        });
+
         console.log('---> accepting');
         request.accept();
-
-        var output = new net.createConnection(FWD_PORT, FWD_HOST, function() {
-          console.log('---> forwarding to [' + FWD_HOST + '] on port [' + FWD_PORT +
-                      ']');
-          session.pipe(output);
-        });
       });
     });
 
     server.listen(139, function() {
-      console.log('netbios-fwd started');
+      console.log('server started');
     });
 
 ## Limitations
@@ -58,7 +50,7 @@ still a work in progress.
 
 Please be aware of the following limitations:
 
-* Currently the code does not support session redirection.  This can be used
+* Currently the code does not support session retargeting.  This can be used
   to instruct a client to close its current connection and try again at a
   different address.  Currently redirection responses are ignored.
 * The API should be considered unstable as it may change in future versions.
@@ -67,15 +59,14 @@ Feedback, testing help, and pull requests welcome.
 
 ## Class: NetbiosSession
 
-The NetbiosSession inherits from the streams2 [Duplex][] class.  This means
-that in addition to the methods below, there are additional methods for
-reading and writing bytes.
+The NetbiosSession class represents a message based session with a remote
+host.  There is an initial session negotiation process that requires the
+caller to request a new session for a particular name.  The other peer
+can then accept or reject the request.  Once a request has been accepted the
+session is considered to be connected.  At this point messages can be sent
+and received.
 
-Reading bytes will return data received from the remote session peer.  For
-documentation on these methods see the [Readable][] class API.
-
-Writing bytes will send the given data to the remote session peer.  For
-documention on these methods see the [Writable][] class API.
+NetbiosSession inherits from [EventEmitter][] class.
 
 ### new NetbiosSession(options)
 
@@ -152,9 +143,58 @@ has been rejected.
     the connection was rejected, then `error` will be set with the result code
     provided by the remote host.
 
-[Duplex]: http://nodejs.org/docs/v0.9.7/api/stream.html#stream_class_stream_duplex
-[Readable]: http://nodejs.org/docs/v0.9.7/api/stream.html#stream_class_stream_readable
-[Writable]: http://nodejs.org/docs/v0.9.7/api/stream.html#stream_class_stream_writable
+### session.write(msg, callback)
+
+Write the given `msg` out to the remote session peer.  If the message can
+be fully flushed to the kernel, then `write()` will return `true`.  If `false`
+is returned, you should wait until the next `'drain'` event before writing
+more data to the session.
+
+* `msg` {Buffer Object} The message `Buffer` to send to the remote session
+  peer.  Note, the message can be at most `NetbiosSession.MAX_MESSAGE_LENGTH`
+  bytes long.
+* `callback` {Function | null}  Optional function that will be called once
+  the `msg` object has been written out or when an error occurs.
+  * `error` {Error Object | null} The error that occurred, if any.
+
+### session.pause()
+
+Stop accepting messages from the remote session peer.  This can be used
+to implement back pressure if the messages are coming too fast.
+
+### session.resume()
+
+Resume accepting message from the remote session peer.
+
+### Constant: `session.MAX_MESSAGE_LENGTH`
+
+Maximum number of bytes that can be passed to a single `write()` method
+call to be sent as a message.  Also, messages received will not exceed
+this limit as well.
+
+### Event: 'connect'
+
+When the NetbiosSession has negotiated and established a new session, the
+`'connect'` event will be emitted.
+
+### Event: 'message'
+
+Whenever a message is received from the remote session peer, a `'message'`
+event will be emitted.
+
+* `msg` {Buffer Object}  A `Buffer` containing the message received.
+
+### Event: 'end'
+
+The `'end'` event is emitted when the session can no longer send or receive
+messages.
+
+### Event: 'error'
+
+The `'error'` event is emitted when an error is encountered.
+
+* `error` {Error Object} The error that occured.
+
 [RFC1001]: http://tools.ietf.org/rfc/rfc1001.txt
 [RFC1002]: http://tools.ietf.org/rfc/rfc1002.txt
 [NetbiosName]: http://www.github.com/wanderview/node-netbios-name

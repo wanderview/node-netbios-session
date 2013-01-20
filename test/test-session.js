@@ -30,20 +30,24 @@ var util = require('util');
 var NBName = require('netbios-name');
 
 module.exports.testAccept = function(test) {
-  test.expect(2);
+  test.expect(3);
 
   var attachCallback = function(error, request) {
     test.equal(error, null);
     request.accept();
   };
 
-  var srcCallback = function(error, stream) {
+  var srcCallback = function(error, session) {
     test.equal(error, null);
-    stream.end();
+    session.end();
     test.done();
   };
 
-  var dstCallback = function(error, stream, server) {
+  var dstCallback = function(error, session, server) {
+    session.on('connect', function() {
+      test.ok(true);
+    });
+
     server.close();
   };
 
@@ -66,12 +70,16 @@ module.exports.testRejectMessage = function(test) {
     request.reject(errorString);
   };
 
-  var srcCallback = function(error, stream) {
+  var srcCallback = function(error, session) {
     test.equal(error.message, 'Connection failed with response code [' + errorString + ']');
     test.done();
   };
 
-  var dstCallback = function(error, stream, server) {
+  var dstCallback = function(error, session, server) {
+    session.on('connect', function() {
+      test.ok(true);
+    });
+
     server.close();
   };
 
@@ -92,12 +100,16 @@ module.exports.testRejectNoMessage = function(test) {
     request.reject();
   };
 
-  var srcCallback = function(error, stream) {
+  var srcCallback = function(error, session) {
     test.equal(error.message, 'Connection failed with response code [Unspecified error]');
     test.done();
   };
 
-  var dstCallback = function(error, stream, server) {
+  var dstCallback = function(error, session, server) {
+    session.on('connect', function() {
+      test.ok(true);
+    });
+
     server.close();
   };
 
@@ -110,9 +122,9 @@ module.exports.testRejectNoMessage = function(test) {
   });
 };
 
-module.exports.testBulkData = function(test) {
-  var bytes = 1024 * 1024;
-  test.expect(bytes + 3);
+module.exports.testMsg = function(test) {
+  var bytes = 1024;
+  test.expect((2*bytes) + 6);
 
   var srcName = 'SRC';
   var dstName = 'DST';
@@ -131,22 +143,215 @@ module.exports.testBulkData = function(test) {
     }
   };
 
-  var srcCallback = function(error, stream) {
+  var srcCallback = function(error, session) {
     test.equal(error, null);
-    stream.write(testBuf, null, function() {
-      stream.end();
+    session.write(testBuf, function(error) {
+      test.equal(error, null);
+      session.write(testBuf, function(error) {
+        test.equal(error, null);
+        session.end();
+      });
     });
   };
 
-  var dstCallback = function(error, stream, server) {
+  var dstCallback = function(error, session, server) {
     test.equal(error, null);
-    _testRead(stream, bytes, function(recvBuf) {
-      for (var i = 0; i < bytes && i < recvBuf.length; ++i) {
-        test.equal(recvBuf[i], testBuf[i]);
-      };
+
+    session.on('error', function(error) {
+      test.equal(error, null);
       server.close();
-      stream.end();
+      session.end();
       test.done();
+    });
+
+    session.on('end', function() {
+      test.ok(true);
+    });
+
+    var count = 0;
+
+    session.on('message', function(msg) {
+      count += 1;
+
+      for (var i = 0; i < bytes && i < msg.length; ++i) {
+        test.equal(msg[i], testBuf[i]);
+      };
+
+      if (count == 2) {
+        // End after a short delay so we can check that only the expected
+        // number of messages come out.
+        setTimeout(function() {
+          server.close();
+          session.end();
+          test.done();
+        }, 500);
+      }
+    });
+  };
+
+  _doConnection({
+    srcName: srcName,
+    dstName: dstName,
+    attachCallback: attachCallback,
+    srcCallback: srcCallback,
+    dstCallback: dstCallback
+  });
+};
+
+module.exports.testPause = function(test) {
+  var bytes = 1024;
+  test.expect(bytes + 5);
+
+  var srcName = 'SRC';
+  var dstName = 'DST';
+
+  var testBuf = new Buffer(bytes);
+  for (var i = 0; i < bytes; ++i) {
+    testBuf.writeUInt8((i % 256), i);
+  }
+
+  var attachCallback = function(error, request) {
+    test.equal(error, null);
+    if (request.callTo.name === dstName) {
+      request.accept();
+    } else {
+      request.reject('Called name not present');
+    }
+  };
+
+  var srcCallback = function(error, session) {
+    test.equal(error, null);
+    session.write(testBuf, function(error) {
+      test.equal(error, null);
+      session.write(testBuf, function(error) {
+        test.equal(error, null);
+        session.end();
+      });
+    });
+  };
+
+  var dstCallback = function(error, session, server) {
+    test.equal(error, null);
+
+    session.on('error', function(error) {
+      test.equal(error, null);
+      server.close();
+      session.end();
+      test.done();
+    });
+
+    session.on('end', function() {
+      test.ok(true);
+    });
+
+    var count = 0;
+
+    session.on('message', function(msg) {
+      count += 1;
+
+      for (var i = 0; i < bytes && i < msg.length; ++i) {
+        test.equal(msg[i], testBuf[i]);
+      };
+
+      if (count == 1) {
+        session.pause();
+
+        // End after a short delay so we can check that only the expected
+        // number of messages come out.
+        setTimeout(function() {
+          server.close();
+          session.end();
+          test.done();
+        }, 500);
+      }
+    });
+  };
+
+  _doConnection({
+    srcName: srcName,
+    dstName: dstName,
+    attachCallback: attachCallback,
+    srcCallback: srcCallback,
+    dstCallback: dstCallback
+  });
+};
+
+module.exports.testResume = function(test) {
+  var bytes = 1024;
+  test.expect((2*bytes) + 8);
+
+  var srcName = 'SRC';
+  var dstName = 'DST';
+
+  var testBuf = new Buffer(bytes);
+  for (var i = 0; i < bytes; ++i) {
+    testBuf.writeUInt8((i % 256), i);
+  }
+
+  var attachCallback = function(error, request) {
+    test.equal(error, null);
+    if (request.callTo.name === dstName) {
+      request.accept();
+    } else {
+      request.reject('Called name not present');
+    }
+  };
+
+  var srcCallback = function(error, session) {
+    test.equal(error, null);
+    session.write(testBuf, function(error) {
+      test.equal(error, null);
+      session.write(testBuf, function(error) {
+        test.equal(error, null);
+        session.end();
+      });
+    });
+  };
+
+  var dstCallback = function(error, session, server) {
+    test.equal(error, null);
+
+    session.on('error', function(error) {
+      test.equal(error, null);
+      server.close();
+      session.end();
+      test.done();
+    });
+
+    session.on('end', function() {
+      test.ok(true);
+    });
+
+    var count = 0;
+    var resumed = false;
+
+    session.on('message', function(msg) {
+      count += 1;
+
+      for (var i = 0; i < bytes && i < msg.length; ++i) {
+        test.equal(msg[i], testBuf[i]);
+      };
+
+      if (count == 1) {
+        session.pause();
+
+        setTimeout(function() {
+          test.ok(true);
+          resumed = true;
+          session.resume();
+        }, 500);
+      }
+
+      if (count == 2) {
+        test.ok(resumed);
+        // End after a short delay so we can check that only the expected
+        // number of messages come out.
+        setTimeout(function() {
+          server.close();
+          session.end();
+          test.done();
+        }, 500);
+      }
     });
   };
 
