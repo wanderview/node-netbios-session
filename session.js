@@ -132,7 +132,8 @@ NetbiosSession.prototype.connect = function(port, addr, callFrom, callTo, cb) {
 
   if (ss.mode || ss.socket) {
     if (typeof cb === 'function') {
-      cb(new Error('Cannot connect Session already active.'));
+      var error = new Error('Cannot connect Session already active.');
+      process.nextTick(cb.bind(null, error));
     }
     return;
   }
@@ -152,6 +153,7 @@ NetbiosSession.prototype.connect = function(port, addr, callFrom, callTo, cb) {
       return;
     }
     self._sendRequest(callTo, callFrom, cb);
+    self._doRead();
   });
 
   self._initInputStream();
@@ -162,7 +164,8 @@ NetbiosSession.prototype.attach = function(socket, callback) {
 
   if (ss.mode || ss.socket) {
     if (typeof callback === 'function') {
-      callback(new Error('Cannot attach Session already active.'));
+      var error = new Error('Cannot attach Session already active.');
+      process.nextTick(callback.bind(null, error));
     }
     return;
   }
@@ -189,7 +192,7 @@ NetbiosSession.prototype.resume = function() {
   var ss = this._sessionState;
   if (ss.paused) {
     ss.paused = false;
-    process.nextTick(this._doRead.bind(this));
+    this._doRead();
   }
 };
 
@@ -216,7 +219,7 @@ NetbiosSession.prototype._sendRequest = function(callTo, callFrom, callback) {
   var res = callTo.write(buf, bytes);
   if (res.error) {
     if (typeof callback === 'function') {
-      callback(res.error);
+      process.nextTick(callback.bind(null, res.error));
     }
     return;
   }
@@ -226,7 +229,7 @@ NetbiosSession.prototype._sendRequest = function(callTo, callFrom, callback) {
   res = callFrom.write(buf, bytes);
   if (res.error) {
     if (typeof callback === 'function') {
-      callback(res.error);
+      process.nextTick(callback.bind(null, res.error));
     }
     return;
   };
@@ -244,9 +247,6 @@ NetbiosSession.prototype._sendRequest = function(callTo, callFrom, callback) {
   ss.connectCallback = callback;
 
   ss.socket.write(buf.slice(0, bytes));
-
-  // Start the read flow to begin looking for response packets
-  this._doRead();
 };
 
 NetbiosSession.prototype.write = function(msg, callback) {
@@ -257,7 +257,7 @@ NetbiosSession.prototype.write = function(msg, callback) {
                           '] exceeds maximum [' + MAX_TRAILER_LENGTH + ']');
     this.emit('error', error);
     if (typeof callback === 'function') {
-      callback(error);
+      process.nextTick(callback.bind(null, error));
     }
 
     return true;
@@ -300,7 +300,7 @@ NetbiosSession.prototype._doDrain = function(callback) {
   }
 
   if (typeof callback === 'function') {
-    callback();
+    process.nextTick(callback);
   }
 }
 
@@ -334,20 +334,25 @@ NetbiosSession.prototype._packHeader = function(buf, offset, typeString, length)
 }
 
 NetbiosSession.prototype._doRead = function() {
-  var ss = this._sessionState;
+  var self = this;
+  var ss = self._sessionState;
 
-  var complete = ss.readFunc();
+  // Always execute whatever reading function we have in nextTick to avoid
+  // issuing callbacks synchronously on connect(), attach(), resume(), etc.
+  process.nextTick(function() {
+    var complete = ss.readFunc();
 
-  if (ss.mode === 'established' && ss.paused) {
-    return;
-  }
+    if (ss.mode === 'established' && ss.paused) {
+      return;
+    }
 
-  if (!complete) {
-    ss.inputStream.once('readable', this._doRead.bind(this));
-    return;
-  }
+    if (!complete) {
+      ss.inputStream.once('readable', self._doRead.bind(self));
+      return;
+    }
 
-  this._doRead();
+    self._doRead();
+  });
 }
 
 NetbiosSession.prototype._readHeader = function() {
