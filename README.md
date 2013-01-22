@@ -7,41 +7,43 @@ A 100% javascript implemention of the NetBIOS session protocol defined in
 
 ## Example
 
-    var Session = require('netbios-session')
-    var net = require('net');
+``` javascript
+var Session = require('netbios-session')
+var net = require('net');
 
-    var NAME = null;
+var NAME = null;
 
-    var server = net.createServer(function(socket) {
-      console.log('---> new connection from [' + socket.remoteAddress + ']');
-      var session = new Session();
-      session.attach(socket, function(error, request) {
-        if (error) {
-          console.log('---> attach error [' + error + ']');
-          return;
-        }
+var server = net.createServer(function(socket) {
+  console.log('---> new connection from [' + socket.remoteAddress + ']');
+  var session = new Session();
+  session.attach(socket, function(error, request) {
+    if (error) {
+      console.log('---> attach error [' + error + ']');
+      return;
+    }
 
-        console.log('---> new call to [' + request.callTo + '] from [' +
-                    request.callFrom + ']');
+    console.log('---> new call to [' + request.callTo + '] from [' +
+                request.callFrom + ']');
 
-        if (NAME && request.callTo.name !== NAME) {
-          console.log('---> rejecting');
-          request.reject('Not listening on called name');
-          return;
-        }
+    if (NAME && request.callTo.name !== NAME) {
+      console.log('---> rejecting');
+      request.reject('Not listening on called name');
+      return;
+    }
 
-        session.on('message', function(msg) {
-          console.log('---> received a message with [' + msg.length + '] bytes');
-        });
-
-        console.log('---> accepting');
-        request.accept();
-      });
+    session.on('message', function(msg) {
+      console.log('---> received a message with [' + msg.length + '] bytes');
     });
 
-    server.listen(139, function() {
-      console.log('server started');
-    });
+    console.log('---> accepting');
+    request.accept();
+  });
+});
+
+server.listen(139, function() {
+  console.log('server started');
+});
+```
 
 ## Limitations
 
