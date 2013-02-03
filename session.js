@@ -142,21 +142,29 @@ NetbiosSession.prototype.connect = function(port, addr, callFrom, callTo, cb) {
     port = DEFAULT_PORT;
   }
 
-  ss.mode = 'establishingOut';
-  ss.socket = net.createConnection(port, addr, function() {
-    if (ss.direct) {
-      if (typeof cb === 'function') {
-        cb();
-      }
-      self._established();
-      self._doRead();
-      return;
-    }
-    self._sendRequest(callTo, callFrom, cb);
-    self._doRead();
+  var socket = net.createConnection(port, addr, function() {
+    self._connectSocket(socket, callFrom, callTo, cb);
   });
+};
 
-  self._initInputStream();
+NetbiosSession.prototype._connectSocket = function(socket, callFrom, callTo, cb) {
+  var ss = this._sessionState;
+
+  ss.socket = socket;
+  this._initInputStream();
+
+  ss.mode = 'establishingOut';
+
+  if (ss.direct) {
+    if (typeof cb === 'function') {
+      cb();
+    }
+    this._established();
+    this._doRead();
+    return;
+  }
+  this._sendRequest(callTo, callFrom, cb);
+  this._doRead();
 };
 
 NetbiosSession.prototype.attach = function(socket, callback) {
@@ -213,7 +221,7 @@ NetbiosSession.prototype._sendRequest = function(callTo, callFrom, callback) {
 
   var buf = new Buffer(HEADER_LENGTH + MAX_TRAILER_LENGTH);
 
-  // Skip the header for the moment while we wmainlinerite the variable length names
+  // Skip the header for the moment while we write the variable length names
   bytes += HEADER_LENGTH;
 
   var res = callTo.write(buf, bytes);
