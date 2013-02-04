@@ -52,15 +52,15 @@ module.exports.server = function(test) {
   });
 
   // validate positive response
-  psocket.response.on('readable', function() {
-    var chunk = psocket.response.read(4);
+  psocket.output.on('readable', function() {
+    var chunk = psocket.output.read(4);
     if (chunk) {
       test.equal(0x82, chunk.readUInt8(0));
       test.equal(0, chunk.readUInt8(1));
       test.equal(0, chunk.readUInt16BE(2));
     }
   });
-  psocket.response.read(0);
+  psocket.output.read(0);
 
   // validate session completes properly
   session.on('end', function() {
@@ -82,9 +82,9 @@ module.exports.client = function(test) {
   var gotRequest = false;
 
   // verify the client sends the expected request and session data
-  psocket.response.on('readable', function() {
+  psocket.output.on('readable', function() {
     if (!gotRequest) {
-      var chunk = psocket.response.read(72);
+      var chunk = psocket.output.read(72);
       if (chunk) {
         test.equal(0x81, chunk.readUInt8(0));
         test.equal(0, chunk.readUInt8(1));
@@ -99,13 +99,13 @@ module.exports.client = function(test) {
         gotRequest = true;
       }
     } else {
-      var chunk = psocket.response.read(msg.length);
+      var chunk = psocket.output.read(msg.length);
       if (chunk) {
         test.equal(msg.length, chunk.length);
       }
     }
   });
-  psocket.response.read(0);
+  psocket.output.read(0);
 
   // verify we can establish a connection, this would fail if the pcap
   // file did not include a positive response
