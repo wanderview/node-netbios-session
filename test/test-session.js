@@ -123,7 +123,7 @@ module.exports.testRejectNoMessage = function(test) {
 };
 
 module.exports.testMsg = function(test) {
-  var bytes = 1024;
+  var bytes = Session.MAX_MESSAGE_LENGTH;
   test.expect((2*bytes) + 6);
 
   var srcName = 'SRC';

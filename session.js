@@ -24,13 +24,33 @@
 'use strict';
 
 module.exports = NetbiosSession;
-module.exports.MAX_MESSAGE_LENGTH = MAX_TRAILER_LENGTH;
+
+module.exports.MAX_MESSAGE_LENGTH = (1 << 17) - 1;
 
 var NBName = require('netbios-name');
 var EventEmitter = require('events').EventEmitter;
-var Readable = require('readable-stream');
 var net = require('net');
 var util = require('util');
+
+// Streams2 compat for v0.8 and v0.9
+var Readable = require('stream').Readable;
+var socketStream = function (s) { return s; };
+var delayedCall = null;
+
+// In v0.8 use the readable-stream module
+if (!Readable) {
+  Readable = require('readable-stream');
+  socketStream = function(sock) {
+    var stream = new Readable();
+    stream.wrap(sock);
+    return stream;
+  }
+  delayedCall = process.nextTick;
+
+// We must use setImmediate in 0.9 due nextTick call semantics change
+} else {
+  delayedCall = setImmediate;
+}
 
 // TODO: Implement retarget response when we have a use case
 
@@ -82,7 +102,7 @@ var ERROR_CODE_FROM_STRING = {
 };
 
 var EXTENSION_LENGTH = 1 << 16;
-var MAX_TRAILER_LENGTH = (1 << 17) - 1;
+var MAX_TRAILER_LENGTH = NetbiosSession.MAX_MESSAGE_LENGTH;
 var HEADER_LENGTH = 4;
 
 util.inherits(NetbiosSession, EventEmitter);
@@ -206,11 +226,7 @@ NetbiosSession.prototype.resume = function() {
 
 NetbiosSession.prototype._initInputStream = function() {
   var ss = this._sessionState;
-  // TODO:  Work around bug in Net.Socket with reading large buffers. Remove
-  //        when node master has been updated.
-  ss.inputStream = new Readable({highWaterMark: MAX_TRAILER_LENGTH +
-                                                HEADER_LENGTH});
-  ss.inputStream.wrap(ss.socket);
+  ss.inputStream = socketStream(ss.socket);
   ss.inputStream.on('error', this.emit.bind(this, 'error'));
   ss.inputStream.on('end', this.emit.bind(this, 'end'));
 }
@@ -347,7 +363,7 @@ NetbiosSession.prototype._doRead = function() {
 
   // Always execute whatever reading function we have in nextTick to avoid
   // issuing callbacks synchronously on connect(), attach(), resume(), etc.
-  process.nextTick(function() {
+  delayedCall(function() {
     var complete = ss.readFunc();
 
     if (ss.mode === 'established' && ss.paused) {
