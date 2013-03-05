@@ -5,7 +5,7 @@
     "netbios",
     "session"
   ],
-  "version": "0.1.4",
+  "version": "0.1.5",
   "author": "Ben Kelly <ben@wanderview.com>",
   "license": "BSD",
   "dependencies": {
