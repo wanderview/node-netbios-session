@@ -35,7 +35,6 @@ var util = require('util');
 // Streams2 compat for v0.8 and v0.9
 var Readable = require('stream').Readable;
 var socketStream = function (s) { return s; };
-var delayedCall = null;
 
 // In v0.8 use the readable-stream module
 if (!Readable) {
@@ -45,11 +44,6 @@ if (!Readable) {
     stream.wrap(sock);
     return stream;
   }
-  delayedCall = process.nextTick;
-
-// We must use setImmediate in 0.9 due nextTick call semantics change
-} else {
-  delayedCall = setImmediate;
 }
 
 // TODO: Implement retarget response when we have a use case
@@ -358,25 +352,20 @@ NetbiosSession.prototype._packHeader = function(buf, offset, typeString, length)
 }
 
 NetbiosSession.prototype._doRead = function() {
-  var self = this;
-  var ss = self._sessionState;
+  var ss = this._sessionState;
 
-  // Always execute whatever reading function we have in nextTick to avoid
-  // issuing callbacks synchronously on connect(), attach(), resume(), etc.
-  delayedCall(function() {
-    var complete = ss.readFunc();
+  var complete = ss.readFunc();
 
-    if (ss.mode === 'established' && ss.paused) {
-      return;
-    }
+  if (ss.mode === 'established' && ss.paused) {
+    return;
+  }
 
-    if (!complete) {
-      ss.inputStream.once('readable', self._doRead.bind(self));
-      return;
-    }
+  if (!complete) {
+    ss.inputStream.once('readable', this._doRead.bind(this));
+    return;
+  }
 
-    self._doRead();
-  });
+  this._doRead();
 }
 
 NetbiosSession.prototype._readHeader = function() {
